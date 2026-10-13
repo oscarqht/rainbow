@@ -1,3 +1,11 @@
 .worktrees
 .raft
 .env.local
+node_modules/
+.next/
+out/
+.env*
+!.env.example
+*.tsbuildinfo
+artifacts/
+.DS_Store
