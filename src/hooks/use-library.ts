@@ -4,7 +4,7 @@ import * as drive from "@/lib/drive";
 import { loadTokens, clearTokens, disconnect, AuthError } from "@/lib/auth-client";
 import { cacheLibrary, getCachedLibrary, clearAccountCache, saveDemoImage, saveDemoFile } from "@/lib/cache";
 import { demoLibrary } from "@/lib/demo";
-import { validateBookmark, validateFile } from "@/lib/library";
+import { validateBookmark, validateCollection, validateFile } from "@/lib/library";
 import { descendantIds } from "@/lib/view";
 import { enrichBookmark } from "@/lib/enrich-bookmark";
 import type { Bookmark, BookmarkData, Collection, CollectionInput, Library, Tokens } from "@/lib/types";
@@ -17,6 +17,7 @@ export function useLibrary() {
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [collectionIds, setCollectionIds] = useState<Record<string, string>>({});
   const [toast, setToast] = useState("");
   const [cacheWarning, setCacheWarning] = useState("");
   const current = useRef(library);
@@ -72,42 +73,102 @@ export function useLibrary() {
   }, [toast]);
   const saveBookmark = async (input: BookmarkData, parentId: string, existing?: Bookmark): Promise<Bookmark> => {
     const data = validateBookmark({ ...input, title: !existing && !input.file && !input.title.trim() ? input.url.slice(0, 500) : input.title });
-    if (existing) return mutate(async () => {
-      const result = owner.current ? await drive.saveBookmark(data, parentId, existing) : { ...data, id: existing?.id ?? crypto.randomUUID(), parentId, version: String(Number(existing?.version ?? 0) + 1), modifiedTime: new Date().toISOString(), demoCover: existing?.demoCover };
+    if (existing && !owner.current) return mutate(async () => {
+      const result = { ...data, id: existing.id, parentId, version: String(Number(existing.version ?? 0) + 1), modifiedTime: new Date().toISOString(), demoCover: existing.demoCover };
       await publish({ ...current.current, bookmarks: [...current.current.bookmarks.filter(b => b.id !== result.id), result] }); return result;
     });
     if (locked.current) throw new Error("A sync or save is in progress. Please try again in a moment.");
     if (owner.current && !navigator.onLine) throw new Error("You’re offline. Keep this draft open and save when you’re connected.");
-    const pending: Bookmark = { ...data, id: `pending_${crypto.randomUUID()}`, parentId, version: "0", modifiedTime: new Date().toISOString() };
+    const previous = current.current;
+    const pending: Bookmark = { ...data, id: existing?.id ?? `pending_${crypto.randomUUID()}`, parentId, version: "0", modifiedTime: new Date().toISOString() };
     setToast("");
     void mutate(async () => {
       // Pending cards stay out of the durable cache until Drive confirms the save.
-      await publish({ ...current.current, bookmarks: [...current.current.bookmarks, pending] }, false);
+      await publish({ ...current.current, bookmarks: [...current.current.bookmarks.filter(b => b.id !== pending.id), pending] }, false);
       try {
-        const enriched = validateBookmark(await enrichBookmark({ ...data, title: input.title }, uploadImage));
-        await publish({ ...current.current, bookmarks: current.current.bookmarks.map(b => b.id === pending.id ? { ...pending, ...enriched } : b) }, false);
-        const result = owner.current ? await drive.createBookmark(enriched, parentId) : { ...enriched, id: crypto.randomUUID(), parentId, version: "1", modifiedTime: new Date().toISOString() };
+        const enriched = existing ? data : validateBookmark(await enrichBookmark({ ...data, title: input.title }, uploadImage));
+        if (!existing) await publish({ ...current.current, bookmarks: current.current.bookmarks.map(b => b.id === pending.id ? { ...pending, ...enriched } : b) }, false);
+        const result = existing ? await drive.editBookmark(data, parentId, existing) : owner.current ? await drive.createBookmark(enriched, parentId) : { ...enriched, id: crypto.randomUUID(), parentId, version: "1", modifiedTime: new Date().toISOString() };
         await publish({ ...current.current, bookmarks: current.current.bookmarks.map(b => b.id === pending.id ? result : b) });
-      } catch {
-        await publish({ ...current.current, bookmarks: current.current.bookmarks.filter(b => b.id !== pending.id) });
-        setToast(`Couldn’t save “${data.title}”${owner.current ? " to Drive" : ""}. Please try again.`);
+      } catch (error) {
+        await publish(previous);
+        setToast(error instanceof Error ? error.message : `Couldn’t save “${data.title}”${owner.current ? " to Drive" : ""}. Please try again.`);
       }
     }, false).catch(() => undefined);
     return pending;
   };
-  const saveCollection = (input: CollectionInput, existing?: Collection) => mutate(async () => {
-    if (!input.name.trim()) throw new Error("Give your collection a name.");
-    if (existing && descendantIds(current.current.collections, existing.id).has(input.parentId)) throw new Error("A collection cannot be moved inside itself.");
-    const result = owner.current ? await drive.saveCollection(input, existing) : { ...existing, ...input, id: existing?.id ?? crypto.randomUUID() };
-    await publish({ ...current.current, collections: [...current.current.collections.filter(c => c.id !== result.id), result] }); return result;
-  });
-  const trashBookmark = (bookmark: Bookmark) => mutate(async () => { if (owner.current) await drive.trashBookmark(bookmark); await publish({ ...current.current, bookmarks: current.current.bookmarks.filter(b => b.id !== bookmark.id) }); });
-  const trashCollection = (collection: Collection) => mutate(async () => {
+  const saveCollection = async (input: CollectionInput, existing?: Collection): Promise<Collection> => {
+    const data = validateCollection(input);
+    if (existing && descendantIds(current.current.collections, existing.id).has(data.parentId)) throw new Error("A collection cannot be moved inside itself.");
+    if (existing?.system && (data.parentId !== current.current.rootId || data.name !== existing.name)) throw new Error("Unsorted must stay at the library root with its original name.");
+    if (!owner.current) return mutate(async () => {
+      const result = { ...existing, ...data, id: existing?.id ?? crypto.randomUUID() };
+      await publish({ ...current.current, collections: [...current.current.collections.filter(c => c.id !== result.id), result] }); return result;
+    });
+    if (locked.current) throw new Error("A sync or save is in progress. Please try again in a moment.");
+    if (!navigator.onLine) throw new Error("You’re offline. Keep this draft open and save when you’re connected.");
+    const previous = current.current;
+    const pending: Collection = { ...existing, ...data, id: existing?.id ?? `pending_${crypto.randomUUID()}`, version: "0" };
+    let failed = false;
+    setToast("");
+    void mutate(async () => {
+      await publish({ ...current.current, collections: [...current.current.collections.filter(c => c.id !== pending.id), pending] }, false);
+      try {
+        const result = await drive.saveCollectionInBackground(data, existing);
+        if (pending.id !== result.id) setCollectionIds(ids => ({ ...ids, [pending.id]: result.id }));
+        await publish({ ...current.current, collections: current.current.collections.map(c => c.id === pending.id ? result : c) });
+      } catch (error) {
+        failed = true;
+        // Folder and settings writes are separate; force a full refresh after rollback.
+        await publish({ ...previous, changeToken: undefined });
+        setToast(error instanceof Error ? error.message : "Couldn’t save this collection. Please try again.");
+      }
+    }, false).catch(() => undefined).finally(() => { if (failed) void sync(); });
+    return pending;
+  };
+  const trashBookmark = async (bookmark: Bookmark): Promise<void> => {
+    if (!owner.current) return mutate(async () => { await publish({ ...current.current, bookmarks: current.current.bookmarks.filter(b => b.id !== bookmark.id) }); });
+    if (locked.current) throw new Error("A sync or save is in progress. Please try again in a moment.");
+    if (!navigator.onLine) throw new Error("You’re offline. Delete when you’re connected.");
+    const previous = current.current;
+    setToast("");
+    void mutate(async () => {
+      await publish({ ...current.current, bookmarks: current.current.bookmarks.filter(b => b.id !== bookmark.id) }, false);
+      try {
+        await drive.deleteBookmark(bookmark);
+        await publish(current.current);
+      } catch (error) {
+        // Cover cleanup can fail after the bookmark has already reached Trash.
+        if (error instanceof drive.BookmarkTrashError) {
+          await publish(current.current);
+          setToast(error.message);
+        } else {
+          await publish(previous);
+          setToast(error instanceof Error ? error.message : `Couldn’t delete “${bookmark.title}” from Drive. Please try again.`);
+        }
+      }
+    }, false).catch(() => undefined);
+  };
+  const trashCollection = async (collection: Collection): Promise<void> => {
     if (collection.system) throw new Error("Unsorted is a system collection and cannot be deleted.");
-    if (owner.current) await drive.trashCollection(collection);
-    const ids = descendantIds(current.current.collections, collection.id);
-    await publish({ ...current.current, collections: current.current.collections.filter(c => !ids.has(c.id)), bookmarks: current.current.bookmarks.filter(b => !ids.has(b.parentId)) });
-  });
+    if (locked.current) throw new Error("A sync or save is in progress. Please try again in a moment.");
+    if (owner.current && !navigator.onLine) throw new Error("You’re offline. Delete when you’re connected.");
+    const previous = current.current;
+    const ids = descendantIds(previous.collections, collection.id);
+    const next = { ...previous, collections: previous.collections.filter(c => !ids.has(c.id)), bookmarks: previous.bookmarks.filter(b => !ids.has(b.parentId)) };
+    if (!owner.current) return mutate(() => publish(next));
+    let failed = false;
+    setToast("");
+    void mutate(async () => {
+      await publish(next, false);
+      try { await drive.deleteCollection(collection); await publish(current.current); }
+      catch (error) {
+        failed = true;
+        await publish({ ...previous, changeToken: undefined });
+        setToast(error instanceof Error ? error.message : "Couldn’t delete this collection. Please try again.");
+      }
+    }, false).catch(() => undefined).finally(() => { if (failed) void sync(); });
+  };
   const uploadImage = async (file: File) => {
     if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type) || file.size > 10 * 1024 * 1024) throw new Error("Choose a PNG, JPG, WebP, or GIF image smaller than 10 MB.");
     return owner.current ? drive.uploadImage(file, current.current.assetsId) : saveDemoImage(file);
@@ -123,5 +184,5 @@ export function useLibrary() {
     current.current = demoLibrary(); setLibrary(current.current);
     if (old) await clearAccountCache(old.accountId).catch(() => undefined);
   };
-  return { library, account, ready, busy, error, toast, dismissToast: () => setToast(""), cacheWarning, sync, saveBookmark, saveCollection, trashBookmark, trashCollection, uploadImage, uploadFile, signOut };
+  return { library, account, ready, busy, error, toast, resolveCollectionId: (id: string) => collectionIds[id] ?? id, dismissToast: () => setToast(""), cacheWarning, sync, saveBookmark, saveCollection, trashBookmark, trashCollection, uploadImage, uploadFile, signOut };
 }
