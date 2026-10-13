@@ -61,3 +61,40 @@ Rainbow uses the `drive.file` scope, so it can see only the files it created or 
 A refresh token in `localStorage` can be read by any script running on the origin. The strict Content Security Policy in `next.config.ts` reduces this risk, but a server-held refresh token with an HttpOnly session cookie would be stronger.
 
 Choose **File** when adding a bookmark to upload any nonempty file up to 50 MB. Image files use the uploaded original as their cover; other files can have a separate cover. File bookmarks open privately in Google Drive. In demo mode, files stay in IndexedDB on this device and the open action downloads them.
+
+### Migrate from Raindrop
+
+Connect Google Drive, open account settings, and choose **Migrate from Raindrop**.
+Paste a Raindrop API token and start the migration. The dialog shows discovery,
+collection/bookmark counts, download/upload bytes, and failures. It copies all
+accessible collections (including shared collections and Unsorted), preserving
+nesting and sibling order. Trash and permanent webpage archives are excluded.
+Existing Rainbow content is retained; imported collections are separate, including
+an imported Unsorted collection. Ordinary externally hosted bookmarks remain links.
+
+Uploaded originals, collection icons, and bookmark covers/media are downloaded and
+re-uploaded into `_assets`. Extra Raindrop bookmark metadata is retained in the
+bookmark JSON's `raindrop` field, including the original URL, timestamps, favorites,
+and highlights. Rainbow's displayed field limits still apply; the original values
+remain in this metadata. Migration never writes to Raindrop.
+
+Keep the tab open while migrating. Pause finishes the current operation and saves
+progress; closing/reloading the tab stops further operations. Reopen the dialog and
+enter the token again to resume or retry failed items. Checkpoints and preallocated
+Drive IDs prevent retries from creating duplicate content. The token is kept only
+in memory, never in Drive checkpoints. A completed migration is retained as a
+one-time import, rather than updating previously imported content on later runs.
+For a consistent snapshot, avoid reorganizing Raindrop during discovery.
+
+The importer spaces Raindrop requests at least 750 ms apart and honors rate-limit
+headers and 429 waits. Other apps using the same Raindrop account can still consume
+the account's shared allowance. File transfers use temporary server disk and 8 MiB
+Drive resumable upload chunks, verifying byte count and MD5 before success. They
+bypass the normal 50 MB attachment limit. Deploy the Node route with sufficient
+temporary disk for the largest file and streaming responses enabled; its configured
+maximum duration is 900 seconds per asset (hosting platforms may impose a lower
+limit). Quota, unavailable originals, disk capacity, or host timeouts leave explicit
+retryable failures; they are never reported as a completed migration. Missing icons
+or covers do not prevent the collection and its links from being copied. Run only one
+migration for a given library at a time; browsers with Web Locks also prevent
+simultaneous runs in tabs on the same device.
