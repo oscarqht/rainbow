@@ -6,6 +6,7 @@ import { cacheLibrary, getCachedLibrary, clearAccountCache, saveDemoImage, saveD
 import { demoLibrary } from "@/lib/demo";
 import { validateBookmark, validateFile } from "@/lib/library";
 import { descendantIds } from "@/lib/view";
+import { enrichBookmark } from "@/lib/enrich-bookmark";
 import type { Bookmark, BookmarkData, Collection, CollectionInput, Library, Tokens } from "@/lib/types";
 const emptyLibrary = (): Library => ({ rootId: "", assetsId: "", unsortedId: "", collections: [], bookmarks: [], syncedAt: "" });
 export function useLibrary() {
@@ -70,41 +71,26 @@ export function useLibrary() {
     return () => window.clearTimeout(timer);
   }, [toast]);
   const saveBookmark = async (input: BookmarkData, parentId: string, existing?: Bookmark): Promise<Bookmark> => {
-    if (!existing && !input.file && (!input.title.trim() || !input.coverFileId)) {
-      let metadata: { title?: string; description?: string; thumbnail?: { data: string; mimeType: string } } = {};
-      try {
-        const response = await fetch("/api/url-metadata", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: input.url, fetchImage: !input.coverFileId }) });
-        if (response.ok) metadata = await response.json();
-      } catch { /* Metadata is optional; saving the URL still works. */ }
-      if (!input.title.trim()) input = { ...input, title: metadata.title || input.url.slice(0, 500), description: input.description.trim() ? input.description : metadata.description || "" };
-      if (!input.coverFileId && metadata.thumbnail) {
-        try {
-          const { data, mimeType } = metadata.thumbnail;
-          const image = new File([Uint8Array.from(atob(data), c => c.charCodeAt(0))], "bookmark-preview", { type: mimeType });
-          // Decode before upload so a broken image never prevents the Drive save.
-          const bitmap = await createImageBitmap(image); bitmap.close();
-          input = { ...input, coverFileId: await uploadImage(image) };
-        } catch { /* Keep saving the bookmark if the preview cannot be stored. */ }
-      }
-    }
-    const data = validateBookmark(input);
-    if (existing || !owner.current) return mutate(async () => {
+    const data = validateBookmark({ ...input, title: !existing && !input.file && !input.title.trim() ? input.url.slice(0, 500) : input.title });
+    if (existing) return mutate(async () => {
       const result = owner.current ? await drive.saveBookmark(data, parentId, existing) : { ...data, id: existing?.id ?? crypto.randomUUID(), parentId, version: String(Number(existing?.version ?? 0) + 1), modifiedTime: new Date().toISOString(), demoCover: existing?.demoCover };
       await publish({ ...current.current, bookmarks: [...current.current.bookmarks.filter(b => b.id !== result.id), result] }); return result;
     });
     if (locked.current) throw new Error("A sync or save is in progress. Please try again in a moment.");
-    if (!navigator.onLine) throw new Error("You’re offline. Keep this draft open and save when you’re connected.");
+    if (owner.current && !navigator.onLine) throw new Error("You’re offline. Keep this draft open and save when you’re connected.");
     const pending: Bookmark = { ...data, id: `pending_${crypto.randomUUID()}`, parentId, version: "0", modifiedTime: new Date().toISOString() };
     setToast("");
     void mutate(async () => {
       // Pending cards stay out of the durable cache until Drive confirms the save.
       await publish({ ...current.current, bookmarks: [...current.current.bookmarks, pending] }, false);
       try {
-        const result = await drive.createBookmark(data, parentId);
+        const enriched = validateBookmark(await enrichBookmark({ ...data, title: input.title }, uploadImage));
+        await publish({ ...current.current, bookmarks: current.current.bookmarks.map(b => b.id === pending.id ? { ...pending, ...enriched } : b) }, false);
+        const result = owner.current ? await drive.createBookmark(enriched, parentId) : { ...enriched, id: crypto.randomUUID(), parentId, version: "1", modifiedTime: new Date().toISOString() };
         await publish({ ...current.current, bookmarks: current.current.bookmarks.map(b => b.id === pending.id ? result : b) });
       } catch {
         await publish({ ...current.current, bookmarks: current.current.bookmarks.filter(b => b.id !== pending.id) });
-        setToast(`Couldn’t save “${data.title}” to Drive. Please try again.`);
+        setToast(`Couldn’t save “${data.title}”${owner.current ? " to Drive" : ""}. Please try again.`);
       }
     }, false).catch(() => undefined);
     return pending;
