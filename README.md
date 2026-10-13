@@ -92,8 +92,11 @@ the account's shared allowance. File transfers use temporary server disk and 8 M
 Drive resumable upload chunks, verifying byte count and MD5 before success. They
 bypass the normal 50 MB attachment limit. Deploy the Node route with sufficient
 temporary disk for the largest file and streaming responses enabled; its configured
-maximum duration is 900 seconds per asset (hosting platforms may impose a lower
-limit). Quota, unavailable originals, disk capacity, or host timeouts leave explicit
+maximum duration is 300 seconds, compatible with Vercel Hobby with Fluid Compute.
+The browser orchestrates separate requests, so the whole import can run longer.
+Each asset transfer stops after 280 seconds to allow cleanup and a retryable error
+before the host deadline. Large or slow files may still exceed this per-file limit.
+Quota, unavailable originals, disk capacity, or host timeouts leave explicit
 retryable failures; they are never reported as a completed migration. Missing icons
 or covers do not prevent the collection and its links from being copied. Run only one
 migration for a given library at a time; browsers with Web Locks also prevent

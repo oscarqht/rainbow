@@ -8,7 +8,7 @@ import type { AssetPlan } from "@/lib/raindrop-migration-model";
 import type { Collection, CollectionInput } from "@/lib/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 900;
+export const maxDuration = 300;
 // Client pacing persists across requests; this guards overlapping requests on this server too.
 const recent = new Map<string, number>();
 export async function POST(request: Request): Promise<Response> {
@@ -51,8 +51,9 @@ export async function POST(request: Request): Promise<Response> {
         start(controller) {
           const emit = (event: unknown) => { if (!abort.signal.aborted) controller.enqueue(encoder.encode(JSON.stringify(event) + "\n")); };
           const heartbeat = setInterval(() => emit({ phase: "Transferring file" }), 10000);
-          void transferAsset(a, String(b.assetsId), token, rt, emit, AbortSignal.any([abort.signal, request.signal, AbortSignal.timeout(850000)]))
-            .catch(error => emit({ error: error instanceof DriveError ? error.message : "Could not transfer this asset. Check the source file, connection, and server disk capacity, then retry.", googleAuth: error instanceof DriveError && error.status === 401 }))
+          // Leave time to report failure and clean up before the Hobby function deadline.
+          void transferAsset(a, String(b.assetsId), token, rt, emit, AbortSignal.any([abort.signal, request.signal, AbortSignal.timeout(280000)]))
+            .catch(error => emit({ error: error instanceof DriveError ? error.message : error instanceof Error && error.name === "TimeoutError" ? "This file exceeded the transfer time limit. Resume to retry it; migration progress is saved." : "Could not transfer this asset. Check the source file, connection, and server disk capacity, then retry.", googleAuth: error instanceof DriveError && error.status === 401 }))
             .finally(() => { clearInterval(heartbeat); if (!abort.signal.aborted) controller.close(); });
         },
         cancel() { abort.abort(); },
