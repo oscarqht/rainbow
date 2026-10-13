@@ -46,8 +46,8 @@ export async function driveRequest(path: string, init: RequestInit = {}, upload 
     return response;
   }
 }
-async function metadata(id: string): Promise<DriveFile> {
-  const response = await driveRequest(`files/${validateId(id)}?fields=${FIELDS}`);
+async function metadata(id: string, request = driveRequest): Promise<DriveFile> {
+  const response = await request(`files/${validateId(id)}?fields=${FIELDS}`);
   return { ...await response.json(), etag: response.headers.get("ETag") || undefined };
 }
 async function list(q: string): Promise<DriveFile[]> {
@@ -143,8 +143,8 @@ export async function loadLibrary(previous?: Library): Promise<Library> {
   });
   return { rootId: libraryRoot.id, assetsId: assets.id, unsortedId: unsortedFile.id, collections, bookmarks, changeToken: token, syncedAt: new Date().toISOString() };
 }
-async function parentRoot(parentId: string): Promise<string> {
-  const p = await metadata(parentId);
+export async function parentRoot(parentId: string, request = driveRequest): Promise<string> {
+  const p = await metadata(parentId, request);
   if (p.trashed || p.mimeType !== FOLDER || p.appProperties?.app !== "rainbow" || !["root", "collection"].includes(p.appProperties.kind)) throw new Error("Choose a valid Rainbow collection.");
   const library = p.appProperties.kind === "root" ? p.id : validateId(p.appProperties.library);
   let ancestor = p;
@@ -153,7 +153,7 @@ async function parentRoot(parentId: string): Promise<string> {
     if (visited.has(ancestor.id) || !ancestor.parents?.[0]) throw new Error("This collection is outside the Rainbow library. Move it back in Drive before saving.");
     visited.add(ancestor.id);
     if (ancestor.parents[0] === library) break;
-    ancestor = await metadata(ancestor.parents[0]);
+    ancestor = await metadata(ancestor.parents[0], request);
     if (ancestor.trashed || ancestor.appProperties?.app !== "rainbow" || ancestor.appProperties?.library !== library || ancestor.appProperties?.kind !== "collection") throw new Error("This collection is outside the Rainbow library. Move it back in Drive before saving.");
   }
   return library;
@@ -178,9 +178,9 @@ async function thumbnail(fileId: string): Promise<{ image: string; mimeType: str
   ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height); bitmap.close();
   return { image: canvas.toDataURL("image/jpeg", .8).split(",")[1].replace(/\+/g, "-").replace(/\//g, "_"), mimeType: "image/jpeg" };
 }
-type Hints = { thumbnail: { image: string; mimeType: string } };
-async function writeJson(name: string, data: unknown, kind: string, parentId: string, library: string, existing?: DriveFile, hints?: Hints): Promise<DriveFile> {
-  const meta = { name, mimeType: "application/json", appProperties: properties(kind, library), ...(!existing ? { parents: [parentId] } : {}), ...(hints ? { contentHints: hints } : {}) };
+export type Hints = { thumbnail: { image: string; mimeType: string } };
+export async function writeJson(name: string, data: unknown, kind: string, parentId: string, library: string, existing?: DriveFile, hints?: Hints, request = driveRequest, createId?: string): Promise<DriveFile> {
+  const meta = { ...(createId ? { id: createId } : {}), name, mimeType: "application/json", appProperties: properties(kind, library), ...(!existing ? { parents: [parentId] } : {}), ...(hints ? { contentHints: hints } : {}) };
   const boundary = `rainbow_${crypto.randomUUID()}`;
   const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(data)}\r\n--${boundary}--`;
   const params = new URLSearchParams({ uploadType: "multipart", fields: FIELDS });
@@ -188,8 +188,23 @@ async function writeJson(name: string, data: unknown, kind: string, parentId: st
     params.set("addParents", parentId);
     if (existing.parents?.length) params.set("removeParents", existing.parents.join(","));
   }
-  const response = await driveRequest(`files${existing ? `/${existing.id}` : ""}?${params}`, { method: existing ? "PATCH" : "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}`, ...(existing?.etag ? { "If-Match": existing.etag } : {}) }, body }, true);
+  const response = await request(`files${existing ? `/${existing.id}` : ""}?${params}`, { method: existing ? "PATCH" : "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}`, ...(existing?.etag ? { "If-Match": existing.etag } : {}) }, body }, true);
   return { ...await response.json(), etag: response.headers.get("ETag") || undefined };
+}
+// Thumbnail decoding stays in the browser; the JSON save runs on the server.
+export async function createBookmark(input: BookmarkData, parentId: string): Promise<Bookmark> {
+  let hints: Hints | undefined;
+  if (input.coverFileId) {
+    try { hints = { thumbnail: await thumbnail(input.coverFileId) }; }
+    catch (error) { if (input.coverFileId !== input.file?.id) throw error; }
+  }
+  let token = await getAccessToken();
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch("/api/bookmarks", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ data: input, parentId, hints }) });
+    if (response.status === 401 && attempt === 0) { token = await getAccessToken(true); continue; }
+    if (!response.ok) throw new Error("Couldn’t save this bookmark to Drive. Please try again.");
+    return response.json();
+  }
 }
 export async function saveBookmark(input: BookmarkData, parentId: string, existing?: Bookmark): Promise<Bookmark> {
   const data = validateBookmark(input), library = await parentRoot(parentId);

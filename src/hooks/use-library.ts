@@ -4,7 +4,7 @@ import * as drive from "@/lib/drive";
 import { loadTokens, clearTokens, disconnect, AuthError } from "@/lib/auth-client";
 import { cacheLibrary, getCachedLibrary, clearAccountCache, saveDemoImage, saveDemoFile } from "@/lib/cache";
 import { demoLibrary } from "@/lib/demo";
-import { validateFile } from "@/lib/library";
+import { validateBookmark, validateFile } from "@/lib/library";
 import { descendantIds } from "@/lib/view";
 import type { Bookmark, BookmarkData, Collection, CollectionInput, Library, Tokens } from "@/lib/types";
 const emptyLibrary = (): Library => ({ rootId: "", assetsId: "", unsortedId: "", collections: [], bookmarks: [], syncedAt: "" });
@@ -16,13 +16,15 @@ export function useLibrary() {
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [toast, setToast] = useState("");
   const [cacheWarning, setCacheWarning] = useState("");
   const current = useRef(library);
   const owner = useRef<Tokens | null>(account);
   const locked = useRef(false);
   const epoch = useRef(0);
-  const publish = useCallback(async (next: Library) => {
+  const publish = useCallback(async (next: Library, cache = true) => {
     current.current = next; setLibrary(next);
+    if (!cache) return;
     try { await cacheLibrary(owner.current?.accountId ?? "demo", next); setCacheWarning(""); }
     catch { setCacheWarning("Local caching is unavailable. Your Drive saves still work."); }
   }, []);
@@ -55,17 +57,41 @@ export function useLibrary() {
     window.addEventListener("focus", onFocus); window.addEventListener("online", onFocus);
     return () => { window.clearInterval(interval); window.removeEventListener("focus", onFocus); window.removeEventListener("online", onFocus); };
   }, [ready, account, sync]);
-  const mutate = async <T,>(fn: () => Promise<T>) => {
+  const mutate = async <T,>(fn: () => Promise<T>, reportError = true) => {
     if (locked.current) throw new Error("A sync or save is in progress. Please try again in a moment.");
     if (owner.current && !navigator.onLine) throw new Error("You’re offline. Keep this draft open and save when you’re connected.");
     locked.current = true; setBusy(true); setError("");
-    try { return await fn(); } catch (err) { setError(err instanceof Error ? err.message : "The change could not be saved."); throw err; }
+    try { return await fn(); } catch (err) { if (reportError) setError(err instanceof Error ? err.message : "The change could not be saved."); throw err; }
     finally { locked.current = false; setBusy(false); }
   };
-  const saveBookmark = (data: BookmarkData, parentId: string, existing?: Bookmark) => mutate(async () => {
-    const result = owner.current ? await drive.saveBookmark(data, parentId, existing) : { ...data, id: existing?.id ?? crypto.randomUUID(), parentId, version: String(Number(existing?.version ?? 0) + 1), modifiedTime: new Date().toISOString(), demoCover: existing?.demoCover };
-    await publish({ ...current.current, bookmarks: [...current.current.bookmarks.filter(b => b.id !== result.id), result] }); return result;
-  });
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(""), 6000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+  const saveBookmark = async (input: BookmarkData, parentId: string, existing?: Bookmark): Promise<Bookmark> => {
+    const data = validateBookmark(input);
+    if (existing || !owner.current) return mutate(async () => {
+      const result = owner.current ? await drive.saveBookmark(data, parentId, existing) : { ...data, id: existing?.id ?? crypto.randomUUID(), parentId, version: String(Number(existing?.version ?? 0) + 1), modifiedTime: new Date().toISOString(), demoCover: existing?.demoCover };
+      await publish({ ...current.current, bookmarks: [...current.current.bookmarks.filter(b => b.id !== result.id), result] }); return result;
+    });
+    if (locked.current) throw new Error("A sync or save is in progress. Please try again in a moment.");
+    if (!navigator.onLine) throw new Error("You’re offline. Keep this draft open and save when you’re connected.");
+    const pending: Bookmark = { ...data, id: `pending_${crypto.randomUUID()}`, parentId, version: "0", modifiedTime: new Date().toISOString() };
+    setToast("");
+    void mutate(async () => {
+      // Pending cards stay out of the durable cache until Drive confirms the save.
+      await publish({ ...current.current, bookmarks: [...current.current.bookmarks, pending] }, false);
+      try {
+        const result = await drive.createBookmark(data, parentId);
+        await publish({ ...current.current, bookmarks: current.current.bookmarks.map(b => b.id === pending.id ? result : b) });
+      } catch {
+        await publish({ ...current.current, bookmarks: current.current.bookmarks.filter(b => b.id !== pending.id) });
+        setToast(`Couldn’t save “${data.title}” to Drive. Please try again.`);
+      }
+    }, false).catch(() => undefined);
+    return pending;
+  };
   const saveCollection = (input: CollectionInput, existing?: Collection) => mutate(async () => {
     if (!input.name.trim()) throw new Error("Give your collection a name.");
     if (existing && descendantIds(current.current.collections, existing.id).has(input.parentId)) throw new Error("A collection cannot be moved inside itself.");
@@ -94,5 +120,5 @@ export function useLibrary() {
     current.current = demoLibrary(); setLibrary(current.current);
     if (old) await clearAccountCache(old.accountId).catch(() => undefined);
   };
-  return { library, account, ready, busy, error, cacheWarning, sync, saveBookmark, saveCollection, trashBookmark, trashCollection, uploadImage, uploadFile, signOut };
+  return { library, account, ready, busy, error, toast, dismissToast: () => setToast(""), cacheWarning, sync, saveBookmark, saveCollection, trashBookmark, trashCollection, uploadImage, uploadFile, signOut };
 }
