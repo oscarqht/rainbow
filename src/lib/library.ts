@@ -29,7 +29,7 @@ export function validateId(value: unknown): string {
 export function validateCollection(value: CollectionInput): CollectionInput {
   if (!["grid", "list"].includes(value.view) || !Number.isFinite(value.order)) throw new Error("Invalid collection settings.");
   if (value.color && !/^#[0-9a-fA-F]{6}$/.test(value.color)) throw new Error("Use a six-digit hex color.");
-  return { ...value, name: text(value.name, "Collection name", 200, true).trim(), parentId: validateId(value.parentId), ...(value.iconFileId ? { iconFileId: validateId(value.iconFileId) } : {}) };
+  return { view: value.view, order: value.order, ...(value.color ? { color: value.color } : {}), name: text(value.name, "Collection name", 200, true).trim(), parentId: validateId(value.parentId), ...(value.iconFileId ? { iconFileId: validateId(value.iconFileId) } : {}) };
 }
 
 export function validateFile(file: File): void {

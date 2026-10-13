@@ -8,6 +8,7 @@ const FOLDER = "application/vnd.google-apps.folder";
 const FIELDS = "id,name,mimeType,parents,modifiedTime,version,appProperties,trashed";
 type DriveFile = { id: string; name: string; mimeType: string; parents?: string[]; modifiedTime: string; version: string; appProperties?: Record<string, string>; trashed?: boolean; etag?: string };
 export class DriveError extends Error { constructor(message: string, public status: number) { super(message); } }
+export class BookmarkTrashError extends Error { readonly bookmarkDeleted = true; }
 export class ConflictError extends Error { constructor() { super("This item changed in another browser or in Drive. Refresh before saving; your draft has been kept."); } }
 
 const RATE_LIMITS = new Set(["rateLimitExceeded", "userRateLimitExceeded", "RATE_LIMIT_EXCEEDED"]);
@@ -46,7 +47,7 @@ export async function driveRequest(path: string, init: RequestInit = {}, upload 
     return response;
   }
 }
-async function metadata(id: string, request = driveRequest): Promise<DriveFile> {
+export async function metadata(id: string, request = driveRequest): Promise<DriveFile> {
   const response = await request(`files/${validateId(id)}?fields=${FIELDS}`);
   return { ...await response.json(), etag: response.headers.get("ETag") || undefined };
 }
@@ -64,8 +65,12 @@ async function list(q: string): Promise<DriveFile[]> {
 }
 const marker = "appProperties has { key='app' and value='rainbow' }";
 const properties = (kind: string, library?: string) => ({ app: "rainbow", kind, ...(library ? { library } : {}) });
-async function createFolder(name: string, kind: string, parent?: string, root?: string): Promise<DriveFile> {
-  return (await driveRequest(`files?fields=${FIELDS}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, mimeType: FOLDER, ...(parent ? { parents: [parent] } : {}), appProperties: properties(kind, root) }) })).json();
+async function createFolder(name: string, kind: string, parent?: string, root?: string, request = driveRequest, id?: string): Promise<DriveFile> {
+  try { return (await request(`files?fields=${FIELDS}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...(id ? { id } : {}), name, mimeType: FOLDER, ...(parent ? { parents: [parent] } : {}), appProperties: properties(kind, root) }) })).json(); }
+  catch (error) {
+    if (id && error instanceof DriveError && error.status === 409) return metadata(id, request);
+    throw error;
+  }
 }
 async function root(): Promise<DriveFile> {
   const roots = await list(`trashed=false and ${marker} and appProperties has { key='kind' and value='root' }`);
@@ -160,8 +165,8 @@ export async function parentRoot(parentId: string, request = driveRequest): Prom
 }
 // Compare modifiedTime, not version: Drive bumps `version` for server-side processing
 // (e.g. generating the thumbnail from contentHints), which would report false conflicts.
-async function assertUnchanged(id: string, modifiedTime?: string): Promise<DriveFile> {
-  const latest = await metadata(id);
+async function assertUnchanged(id: string, modifiedTime?: string, request = driveRequest): Promise<DriveFile> {
+  const latest = await metadata(id, request);
   if (latest.trashed || (modifiedTime && latest.modifiedTime !== modifiedTime)) throw new ConflictError();
   return latest;
 }
@@ -191,79 +196,128 @@ export async function writeJson(name: string, data: unknown, kind: string, paren
   const response = await request(`files${existing ? `/${existing.id}` : ""}?${params}`, { method: existing ? "PATCH" : "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}`, ...(existing?.etag ? { "If-Match": existing.etag } : {}) }, body }, true);
   return { ...await response.json(), etag: response.headers.get("ETag") || undefined };
 }
-// Thumbnail decoding stays in the browser; the JSON save runs on the server.
-export async function createBookmark(input: BookmarkData, parentId: string): Promise<Bookmark> {
-  let hints: Hints | undefined;
-  if (input.coverFileId) {
-    try { hints = { thumbnail: await thumbnail(input.coverFileId) }; }
-    catch (error) { if (input.coverFileId !== input.file?.id) throw error; }
-  }
-  let token = await getAccessToken();
-  for (let attempt = 0; ; attempt++) {
-    const response = await fetch("/api/bookmarks", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ data: input, parentId, hints }) });
-    if (response.status === 401 && attempt === 0) { token = await getAccessToken(true); continue; }
-    if (!response.ok) throw new Error("Couldn’t save this bookmark to Drive. Please try again.");
-    return response.json();
+// Thumbnail decoding stays in the browser; bookmark writes run on the server.
+async function bookmarkHints(input: BookmarkData): Promise<Hints | undefined> {
+  if (!input.coverFileId) return;
+  try { return { thumbnail: await thumbnail(input.coverFileId) }; }
+  catch (error) {
+    // Some image attachments cannot be decoded by canvas; keep the original cover.
+    if (input.coverFileId !== input.file?.id) throw error;
   }
 }
+export async function createBookmark(input: BookmarkData, parentId: string): Promise<Bookmark> {
+  return mutationRequest("/api/bookmarks", "POST", { data: input, parentId, hints: await bookmarkHints(input) });
+}
+export async function editBookmark(input: BookmarkData, parentId: string, existing: Bookmark): Promise<Bookmark> {
+  return mutationRequest("/api/bookmarks", "PATCH", { data: input, parentId, existing, hints: await bookmarkHints(input) });
+}
+export async function deleteBookmark(bookmark: Bookmark): Promise<void> {
+  await mutationRequest("/api/bookmarks", "DELETE", { existing: bookmark });
+}
+async function mutationRequest<T>(path: string, method: string, body: unknown): Promise<T> {
+  let token = await getAccessToken();
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch(path, { method, headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+    if (response.status === 401 && attempt === 0) { token = await getAccessToken(true); continue; }
+    const result = await response.json();
+    if (!response.ok) {
+      const message = result.error || "Couldn’t update this bookmark in Drive. Please try again.";
+      if (result.bookmarkDeleted) throw new BookmarkTrashError(message);
+      throw new Error(message);
+    }
+    return result;
+  }
+}
+
 export async function saveBookmark(input: BookmarkData, parentId: string, existing?: Bookmark): Promise<Bookmark> {
   const data = validateBookmark(input), library = await parentRoot(parentId);
-  let hints: Hints | undefined;
-  if (data.coverFileId) {
-    try { hints = { thumbnail: await thumbnail(data.coverFileId) }; }
-    catch (error) {
-      // Some uploaded image formats cannot be decoded by canvas; keep the original as the cover.
-      if (data.coverFileId !== data.file?.id) throw error;
-    }
-  }
+  const hints = await bookmarkHints(data);
   const latest = existing ? await assertUnchanged(existing.id, existing.modifiedTime) : undefined;
   if (latest && (latest.appProperties?.library !== library || latest.appProperties?.kind !== "bookmark")) throw new Error("Invalid bookmark reference.");
   const file = await writeJson(`${data.title}.json`, data, "bookmark", parentId, library, latest, hints);
   return { ...data, id: file.id, parentId, modifiedTime: file.modifiedTime, version: file.version, etag: file.etag };
 }
-export async function saveCollection(input: CollectionInput, existing?: Collection): Promise<Collection> {
-  const data = validateCollection(input), library = await parentRoot(data.parentId);
+export async function saveCollectionInBackground(input: CollectionInput, existing?: Collection): Promise<Collection> {
+  return mutationRequest("/api/collections", existing ? "PATCH" : "POST", { data: input, existing });
+}
+export async function deleteCollection(collection: Collection): Promise<void> {
+  await mutationRequest("/api/collections", "DELETE", { existing: collection });
+}
+export async function saveCollection(input: CollectionInput, existing?: Collection, request = driveRequest, createIds?: { folder: string; config: string }): Promise<Collection> {
+  const data = validateCollection(input), library = await parentRoot(data.parentId, request);
   let folder: DriveFile;
+  let config: DriveFile | undefined;
   if (existing) {
     if (existing.id === data.parentId) throw new Error("A collection cannot contain itself.");
     let ancestor = data.parentId;
     const visited = new Set<string>();
     while (ancestor !== library) {
       if (ancestor === existing.id || visited.has(ancestor)) throw new Error("A collection cannot move into one of its descendants.");
-      visited.add(ancestor); const p = await metadata(ancestor); ancestor = p.parents?.[0] || library;
+      visited.add(ancestor); const p = await metadata(ancestor, request); ancestor = p.parents?.[0] || library;
     }
-    const latest = await assertUnchanged(existing.id, existing.modifiedTime);
+    const latest = await assertUnchanged(existing.id, existing.modifiedTime, request);
     if (latest.appProperties?.library !== library || latest.appProperties?.kind !== "collection") throw new Error("Invalid collection reference.");
-    if (existing.system && data.parentId !== library) throw new Error("Unsorted must stay at the library root.");
-    if (existing.configId) await assertUnchanged(existing.configId, existing.configModifiedTime);
+    if (latest.appProperties?.system === "unsorted" && (data.parentId !== library || data.name !== latest.name)) throw new Error("Unsorted must stay at the library root.");
+    if (existing.configId) {
+      config = await assertUnchanged(existing.configId, existing.configModifiedTime, request);
+      if (config.appProperties?.app !== "rainbow" || config.appProperties?.kind !== "config" || config.appProperties?.library !== library || !config.parents?.includes(existing.id)) throw new Error("Invalid collection settings reference.");
+    }
     const params = new URLSearchParams({ fields: FIELDS });
     if (!latest.parents?.includes(data.parentId)) { params.set("addParents", data.parentId); params.set("removeParents", latest.parents?.join(",") || ""); }
-    folder = await (await driveRequest(`files/${existing.id}?${params}`, { method: "PATCH", headers: { "Content-Type": "application/json", ...(latest.etag ? { "If-Match": latest.etag } : {}) }, body: JSON.stringify({ name: data.name }) })).json();
-  } else folder = await createFolder(data.name, "collection", data.parentId, library);
-  const config = existing?.configId ? await assertUnchanged(existing.configId, existing.configModifiedTime) : undefined;
-  const written = await writeJson("_collection.json", data, "config", folder.id, library, config);
-  return { ...data, id: folder.id, version: folder.version, modifiedTime: folder.modifiedTime, configId: written.id, configVersion: written.version, configModifiedTime: written.modifiedTime, system: existing?.system };
+    try { folder = await (await request(`files/${existing.id}?${params}`, { method: "PATCH", headers: { "Content-Type": "application/json", ...(latest.etag ? { "If-Match": latest.etag } : {}) }, body: JSON.stringify({ name: data.name }) })).json(); }
+    catch (error) {
+      if (request === driveRequest) throw error;
+      const saved = await metadata(existing.id, request);
+      if (saved.trashed || saved.name !== data.name || !saved.parents?.includes(data.parentId)) throw error;
+      folder = saved;
+    }
+  } else folder = await createFolder(data.name, "collection", data.parentId, library, request, createIds?.folder);
+  let written: DriveFile;
+  try { written = await writeJson("_collection.json", data, "config", folder.id, library, config, undefined, request, config ? undefined : createIds?.config); }
+  catch (error) {
+    const id = config?.id ?? createIds?.config;
+    if (request === driveRequest || !id) throw error;
+    // A retry may hit 409/412 after the first settings write actually committed.
+    try {
+      const saved = await metadata(id, request);
+      const raw = await (await request(`files/${validateId(id)}?alt=media`)).json();
+      if (saved.trashed || JSON.stringify(validateCollection(raw)) !== JSON.stringify(data)) throw error;
+      written = saved;
+    } catch {
+      // The folder write already completed. Do not replay a whole create on 401;
+      // let the client refresh the two-file result before another save.
+      throw new Error("The collection settings could not be confirmed. Refresh your library before trying again.", { cause: error });
+    }
+  }
+  return { ...data, id: folder.id, version: folder.version, modifiedTime: folder.modifiedTime, configId: written.id, configVersion: written.version, configModifiedTime: written.modifiedTime, system: folder.appProperties?.system === "unsorted" ? "unsorted" : existing?.system };
 }
-async function trash(item: { id: string; modifiedTime?: string }, allowTrashed = false): Promise<void> {
-  const latest = await metadata(item.id);
+async function trash(item: { id: string; modifiedTime?: string }, allowTrashed = false, request = driveRequest): Promise<void> {
+  const latest = await metadata(item.id, request);
   if (latest.trashed && allowTrashed) return;
   if (latest.trashed || (item.modifiedTime && latest.modifiedTime !== item.modifiedTime)) throw new ConflictError();
-  await driveRequest(`files/${validateId(item.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json", ...(latest.etag ? { "If-Match": latest.etag } : {}) }, body: JSON.stringify({ trashed: true }) });
+  try {
+    await request(`files/${validateId(item.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json", ...(latest.etag ? { "If-Match": latest.etag } : {}) }, body: JSON.stringify({ trashed: true }) });
+  } catch (error) {
+    // A retry after a lost response can fail its original If-Match condition.
+    if (request !== driveRequest && (await metadata(item.id, request)).trashed) return;
+    throw error;
+  }
 }
-export async function trashBookmark(bookmark: Bookmark): Promise<void> {
+export async function trashBookmark(bookmark: Bookmark, request = driveRequest): Promise<void> {
   // Allow retrying cover cleanup after the bookmark has already reached Trash.
-  await trash(bookmark, !!bookmark.coverFileId);
+  await trash(bookmark, !!bookmark.coverFileId || request !== driveRequest, request);
   if (bookmark.coverFileId) {
-    try { await trash({ id: bookmark.coverFileId }, true); }
+    try { await trash({ id: bookmark.coverFileId }, true, request); }
     catch (error) {
       if (error instanceof DriveError && error.status === 404) return;
-      throw new Error(`The bookmark is in Trash, but its cover could not be moved to Trash. Retry deleting this bookmark to finish cleanup. ${(error as Error).message}`);
+      throw new BookmarkTrashError(`The bookmark is in Trash, but its cover could not be moved to Trash. Retry deleting this bookmark to finish cleanup. ${(error as Error).message}`);
     }
   }
 }
-export async function trashCollection(collection: Collection): Promise<void> {
+
+export async function trashCollection(collection: Collection, request = driveRequest): Promise<void> {
   if (collection.system) throw new Error("Unsorted cannot be deleted.");
-  await trash(collection);
+  await trash(collection, request !== driveRequest, request);
 }
 export async function uploadImage(file: File, assetsId: string): Promise<string> {
   if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type) || file.size > 10 * 1024 * 1024 || file.size === 0) throw new Error("Choose a PNG, JPG, GIF, or WebP image under 10 MB.");
