@@ -6,8 +6,8 @@ import { Button } from "./ui/button";
 import { PrivateImage } from "./private-image";
 import { descendantIds } from "@/lib/view";
 import type { Collection, CollectionInput } from "@/lib/types";
-type Props = { collection?: Collection; collections: Collection[]; rootId: string; parentId: string; onClose: () => void; onSave: (input: CollectionInput, existing?: Collection) => Promise<Collection>; onDelete: (collection: Collection) => Promise<void>; uploadImage: (file: File) => Promise<string>; busy: boolean };
-export function CollectionEditor({ collection, collections, rootId, parentId, onClose, onSave, onDelete, uploadImage, busy }: Props) {
+type Props = { collection?: Collection; collections: Collection[]; rootId: string; parentId: string; onClose: () => void; onSave: (input: CollectionInput, existing?: Collection) => Promise<Collection>; onDelete: (collection: Collection) => Promise<void>; uploadImage: (file: File) => Promise<string> };
+export function CollectionEditor({ collection, collections, rootId, parentId, onClose, onSave, onDelete, uploadImage }: Props) {
   const [name, setName] = useState(collection?.name ?? "");
   const [parent, setParent] = useState(collection?.parentId ?? parentId);
   const [color, setColor] = useState(collection?.color ?? "#759284");
@@ -39,7 +39,7 @@ export function CollectionEditor({ collection, collections, rootId, parentId, on
       <div className="form-columns"><label>Default view<select value={view} onChange={e => setView(e.target.value as "grid" | "list")}><option value="grid">Grid</option><option value="list">List</option></select></label><label>Display order<input type="number" min={0} max={100000} value={order} onChange={e => setOrder(Number(e.target.value))} /></label></div>
       <div className="cover-field">{iconId && <PrivateImage fileId={iconId} className="folder-icon-preview" />}<label className="upload-button"><ImagePlus size={17} />{icon ? icon.name : "Upload a custom icon"}<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={e => setIcon(e.target.files?.[0])} /></label>{iconId && <Button variant="ghost" type="button" onClick={() => { setIconId(undefined); setIcon(undefined); }}>Remove</Button>}</div>
       {error && <p role="alert" className="form-error">{error}</p>}
-      <div className="dialog-footer">{collection && !collection.system && <Button variant="ghost" size="icon" type="button" aria-label="Delete collection" disabled={saving || busy} onClick={() => void remove()}><Trash2 size={18} /></Button>}<div className="footer-actions"><Button variant="secondary" type="button" disabled={saving} onClick={onClose}>Cancel</Button><Button disabled={saving || busy}>{saving && <Loader2 size={16} className="spin" />} {saving ? "Saving…" : "Save collection"}</Button></div></div>
+      <div className="dialog-footer">{collection && !collection.system && <Button variant="ghost" size="icon" type="button" aria-label="Delete collection" disabled={saving} onClick={() => void remove()}><Trash2 size={18} /></Button>}<div className="footer-actions"><Button variant="secondary" type="button" disabled={saving} onClick={onClose}>Cancel</Button><Button disabled={saving}>{saving && <Loader2 size={16} className="spin" />} {saving ? "Saving…" : "Save collection"}</Button></div></div>
     </form>
   </DialogContent></Dialog>;
 }

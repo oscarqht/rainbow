@@ -6,6 +6,7 @@ import { cacheLibrary, getCachedLibrary, clearAccountCache, saveDemoImage, saveD
 import { demoLibrary } from "@/lib/demo";
 import { validateBookmark, validateCollection, validateFile } from "@/lib/library";
 import { descendantIds } from "@/lib/view";
+import { OptimisticLibrary } from "@/lib/optimistic-library";
 import { enrichBookmark } from "@/lib/enrich-bookmark";
 import type { Bookmark, BookmarkData, Collection, CollectionInput, Library, Tokens } from "@/lib/types";
 const emptyLibrary = (): Library => ({ rootId: "", assetsId: "", unsortedId: "", collections: [], bookmarks: [], syncedAt: "" });
@@ -20,25 +21,42 @@ export function useLibrary() {
   const [cacheWarning, setCacheWarning] = useState("");
   const current = useRef(library);
   const owner = useRef<Tokens | null>(null);
-  const locked = useRef(false);
+  const syncing = useRef(false);
+  const ids = useRef<Record<string, string>>({});
+  const resolveId = (id: string) => ids.current[id] ?? id;
   const epoch = useRef(0);
-  const publish = useCallback(async (next: Library, cache = true) => {
+  const publish = useCallback((next: Library) => {
     current.current = next; setLibrary(next);
-    if (!cache) return;
-    try { await cacheLibrary(owner.current?.accountId ?? "demo", next); setCacheWarning(""); }
-    catch { setCacheWarning("Local caching is unavailable. Your Drive saves still work."); }
   }, []);
-  const sync = useCallback(async () => {
-    if (!owner.current || locked.current) return;
-    locked.current = true; setBusy(true); setError("");
+  const jobs = useRef<OptimisticLibrary | null>(null);
+  useEffect(() => {
+    jobs.current = new OptimisticLibrary(async (visible, confirmed) => {
+      publish(visible);
+      setBusy(jobs.current!.busy);
+      if (confirmed) {
+        try { await cacheLibrary(owner.current?.accountId ?? "demo", confirmed); setCacheWarning(""); }
+        catch { setCacheWarning("Local caching is unavailable. Your Drive saves still work."); }
+      }
+    });
+  }, [publish]);
+  const sync = useCallback(async (full = false) => {
+    if (!owner.current || syncing.current) return;
+    syncing.current = true; setError("");
     const start = epoch.current;
-    try { const next = await drive.loadLibrary(current.current.rootId.startsWith("demo") ? undefined : current.current); if (start === epoch.current) await publish(next); }
-    catch (err) {
+    try {
+      await jobs.current!.enqueue(current.current, { apply: library => library, save: async library => {
+        try { return await drive.loadLibrary(library.rootId.startsWith("demo") ? undefined : full ? { ...library, changeToken: undefined } : library); }
+        catch (err) {
+          if (!(err instanceof AuthError) || loadTokens()) throw err;
+          owner.current = null; setAccount(null); setError(err.message);
+          return demoLibrary();
+        }
+      } });
+    } catch (err) {
       if (start !== epoch.current) return;
       setError(err instanceof Error ? err.message : "Unable to sync. Try again.");
-      if (err instanceof AuthError && !loadTokens()) { owner.current = null; setAccount(null); current.current = demoLibrary(); setLibrary(current.current); }
-    } finally { if (start === epoch.current) { locked.current = false; setBusy(false); } }
-  }, [publish]);
+    } finally { syncing.current = false; }
+  }, []);
   useEffect(() => {
     let alive = true;
     async function initialize() {
@@ -71,12 +89,24 @@ export function useLibrary() {
     window.addEventListener("focus", onFocus); window.addEventListener("online", onFocus);
     return () => { window.clearInterval(interval); window.removeEventListener("focus", onFocus); window.removeEventListener("online", onFocus); };
   }, [ready, account, sync]);
-  const mutate = async <T,>(fn: () => Promise<T>, reportError = true) => {
-    if (locked.current) throw new Error("A sync or save is in progress. Please try again in a moment.");
+  const checkOnline = () => {
     if (owner.current && !navigator.onLine) throw new Error("You’re offline. Keep this draft open and save when you’re connected.");
-    locked.current = true; setBusy(true); setError("");
-    try { return await fn(); } catch (err) { if (reportError) setError(err instanceof Error ? err.message : "The change could not be saved."); throw err; }
-    finally { locked.current = false; setBusy(false); }
+  };
+  const parentIdFor = (library: Library, id: string) => {
+    const resolved = resolveId(id);
+    if (resolved !== library.rootId && !library.collections.some(c => c.id === resolved)) throw new Error("This collection is no longer available. Please choose another collection.");
+    return resolved;
+  };
+  const background = (apply: (library: Library) => Library, save: (library: Library) => Promise<Library>, refreshOnFailure = false) => {
+    setToast(""); setError("");
+    const accountId = owner.current?.accountId;
+    void jobs.current!.enqueue(current.current, { apply, save: async library => {
+      if (owner.current?.accountId !== accountId) throw new Error("Your session expired. Please reconnect Google Drive.");
+      return save(library);
+    } }).catch(error => {
+      setToast(error instanceof Error ? error.message : "The change could not be saved. Please try again.");
+      if (refreshOnFailure) void sync(true);
+    });
   };
   useEffect(() => {
     if (!toast) return;
@@ -84,102 +114,61 @@ export function useLibrary() {
     return () => window.clearTimeout(timer);
   }, [toast]);
   const saveBookmark = async (input: BookmarkData, parentId: string, existing?: Bookmark): Promise<Bookmark> => {
+    checkOnline();
     const data = validateBookmark({ ...input, title: !existing && !input.file && !input.title.trim() ? input.url.slice(0, 500) : input.title });
-    if (existing && !owner.current) return mutate(async () => {
-      const result = { ...data, id: existing.id, parentId, version: String(Number(existing.version ?? 0) + 1), modifiedTime: new Date().toISOString(), demoCover: existing.demoCover };
-      await publish({ ...current.current, bookmarks: [...current.current.bookmarks.filter(b => b.id !== result.id), result] }); return result;
+    const pending: Bookmark = { ...existing, ...data, id: existing?.id ?? `pending_${crypto.randomUUID()}`, parentId, version: "0", modifiedTime: new Date().toISOString() };
+    background(library => ({ ...library, bookmarks: [...library.bookmarks.filter(b => b.id !== resolveId(pending.id)), { ...pending, id: resolveId(pending.id), parentId: resolveId(parentId) }] }), async library => {
+      const parent = parentIdFor(library, parentId);
+      const previous = existing ? library.bookmarks.find(b => b.id === resolveId(existing.id)) : undefined;
+      if (existing && !previous) throw new Error("This bookmark is no longer available.");
+      const enriched = existing ? data : validateBookmark(await enrichBookmark({ ...data, title: input.title }, uploadImage));
+      const result = owner.current ? previous ? await drive.editBookmark(data, parent, previous) : await drive.createBookmark(enriched, parent) : { ...pending, ...enriched, id: previous?.id ?? crypto.randomUUID(), parentId: parent, version: String(Number(previous?.version ?? 0) + 1) };
+      ids.current[pending.id] = result.id;
+      return { ...library, bookmarks: [...library.bookmarks.filter(b => b.id !== result.id), result] };
     });
-    if (locked.current) throw new Error("A sync or save is in progress. Please try again in a moment.");
-    if (owner.current && !navigator.onLine) throw new Error("You’re offline. Keep this draft open and save when you’re connected.");
-    const previous = current.current;
-    const pending: Bookmark = { ...data, id: existing?.id ?? `pending_${crypto.randomUUID()}`, parentId, version: "0", modifiedTime: new Date().toISOString() };
-    setToast("");
-    void mutate(async () => {
-      // Pending cards stay out of the durable cache until Drive confirms the save.
-      await publish({ ...current.current, bookmarks: [...current.current.bookmarks.filter(b => b.id !== pending.id), pending] }, false);
-      try {
-        const enriched = existing ? data : validateBookmark(await enrichBookmark({ ...data, title: input.title }, uploadImage));
-        if (!existing) await publish({ ...current.current, bookmarks: current.current.bookmarks.map(b => b.id === pending.id ? { ...pending, ...enriched } : b) }, false);
-        const result = existing ? await drive.editBookmark(data, parentId, existing) : owner.current ? await drive.createBookmark(enriched, parentId) : { ...enriched, id: crypto.randomUUID(), parentId, version: "1", modifiedTime: new Date().toISOString() };
-        await publish({ ...current.current, bookmarks: current.current.bookmarks.map(b => b.id === pending.id ? result : b) });
-      } catch (error) {
-        await publish(previous);
-        setToast(error instanceof Error ? error.message : `Couldn’t save “${data.title}”${owner.current ? " to Drive" : ""}. Please try again.`);
-      }
-    }, false).catch(() => undefined);
     return pending;
   };
   const saveCollection = async (input: CollectionInput, existing?: Collection): Promise<Collection> => {
+    checkOnline();
     const data = validateCollection(input);
-    if (existing && descendantIds(current.current.collections, existing.id).has(data.parentId)) throw new Error("A collection cannot be moved inside itself.");
+    if (existing && descendantIds(current.current.collections, resolveId(existing.id)).has(resolveId(data.parentId))) throw new Error("A collection cannot be moved inside itself.");
     if (existing?.system && (data.parentId !== current.current.rootId || data.name !== existing.name)) throw new Error("Unsorted must stay at the library root with its original name.");
-    if (!owner.current) return mutate(async () => {
-      const result = { ...existing, ...data, id: existing?.id ?? crypto.randomUUID() };
-      await publish({ ...current.current, collections: [...current.current.collections.filter(c => c.id !== result.id), result] }); return result;
-    });
-    if (locked.current) throw new Error("A sync or save is in progress. Please try again in a moment.");
-    if (!navigator.onLine) throw new Error("You’re offline. Keep this draft open and save when you’re connected.");
-    const previous = current.current;
     const pending: Collection = { ...existing, ...data, id: existing?.id ?? `pending_${crypto.randomUUID()}`, version: "0" };
-    let failed = false;
-    setToast("");
-    void mutate(async () => {
-      await publish({ ...current.current, collections: [...current.current.collections.filter(c => c.id !== pending.id), pending] }, false);
-      try {
-        const result = await drive.saveCollectionInBackground(data, existing);
-        if (pending.id !== result.id) setCollectionIds(ids => ({ ...ids, [pending.id]: result.id }));
-        await publish({ ...current.current, collections: current.current.collections.map(c => c.id === pending.id ? result : c) });
-      } catch (error) {
-        failed = true;
-        // Folder and settings writes are separate; force a full refresh after rollback.
-        await publish({ ...previous, changeToken: undefined });
-        setToast(error instanceof Error ? error.message : "Couldn’t save this collection. Please try again.");
-      }
-    }, false).catch(() => undefined).finally(() => { if (failed) void sync(); });
+    background(library => ({ ...library, collections: [...library.collections.filter(c => c.id !== resolveId(pending.id)), { ...pending, id: resolveId(pending.id), parentId: resolveId(data.parentId) }] }), async library => {
+      const parentId = parentIdFor(library, data.parentId);
+      const previous = existing ? library.collections.find(c => c.id === resolveId(existing.id)) : undefined;
+      if (existing && !previous) throw new Error("This collection is no longer available.");
+      const result = owner.current ? await drive.saveCollectionInBackground({ ...data, parentId }, previous) : { ...pending, id: previous?.id ?? crypto.randomUUID(), parentId, version: "1" };
+      ids.current[pending.id] = result.id;
+      setCollectionIds({ ...ids.current });
+      return { ...library, collections: [...library.collections.filter(c => c.id !== result.id), result] };
+    }, true);
     return pending;
   };
   const trashBookmark = async (bookmark: Bookmark): Promise<void> => {
-    if (!owner.current) return mutate(async () => { await publish({ ...current.current, bookmarks: current.current.bookmarks.filter(b => b.id !== bookmark.id) }); });
-    if (locked.current) throw new Error("A sync or save is in progress. Please try again in a moment.");
-    if (!navigator.onLine) throw new Error("You’re offline. Delete when you’re connected.");
-    const previous = current.current;
-    setToast("");
-    void mutate(async () => {
-      await publish({ ...current.current, bookmarks: current.current.bookmarks.filter(b => b.id !== bookmark.id) }, false);
-      try {
-        await drive.deleteBookmark(bookmark);
-        await publish(current.current);
-      } catch (error) {
-        // Cover cleanup can fail after the bookmark has already reached Trash.
-        if (error instanceof drive.BookmarkTrashError) {
-          await publish(current.current);
-          setToast(error.message);
-        } else {
-          await publish(previous);
-          setToast(error instanceof Error ? error.message : `Couldn’t delete “${bookmark.title}” from Drive. Please try again.`);
-        }
+    checkOnline();
+    const apply = (library: Library) => ({ ...library, bookmarks: library.bookmarks.filter(b => b.id !== resolveId(bookmark.id)) });
+    background(apply, async library => {
+      const previous = library.bookmarks.find(b => b.id === resolveId(bookmark.id));
+      if (previous && owner.current) {
+        try { await drive.deleteBookmark(previous); }
+        catch (error) { if (!(error instanceof drive.BookmarkTrashError)) throw error; setToast(error.message); }
       }
-    }, false).catch(() => undefined);
+      return apply(library);
+    });
   };
   const trashCollection = async (collection: Collection): Promise<void> => {
     if (collection.system) throw new Error("Unsorted is a system collection and cannot be deleted.");
-    if (locked.current) throw new Error("A sync or save is in progress. Please try again in a moment.");
-    if (owner.current && !navigator.onLine) throw new Error("You’re offline. Delete when you’re connected.");
-    const previous = current.current;
-    const ids = descendantIds(previous.collections, collection.id);
-    const next = { ...previous, collections: previous.collections.filter(c => !ids.has(c.id)), bookmarks: previous.bookmarks.filter(b => !ids.has(b.parentId)) };
-    if (!owner.current) return mutate(() => publish(next));
-    let failed = false;
-    setToast("");
-    void mutate(async () => {
-      await publish(next, false);
-      try { await drive.deleteCollection(collection); await publish(current.current); }
-      catch (error) {
-        failed = true;
-        await publish({ ...previous, changeToken: undefined });
-        setToast(error instanceof Error ? error.message : "Couldn’t delete this collection. Please try again.");
-      }
-    }, false).catch(() => undefined).finally(() => { if (failed) void sync(); });
+    checkOnline();
+    const apply = (library: Library) => {
+      const removed = descendantIds(library.collections, resolveId(collection.id));
+      return { ...library, collections: library.collections.filter(c => !removed.has(c.id)), bookmarks: library.bookmarks.filter(b => !removed.has(b.parentId)) };
+    };
+    background(apply, async library => {
+      const previous = library.collections.find(c => c.id === resolveId(collection.id));
+      if (previous && owner.current) await drive.deleteCollection(previous);
+      return apply(library);
+    }, true);
   };
   const uploadImage = async (file: File) => {
     if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type) || file.size > 10 * 1024 * 1024) throw new Error("Choose a PNG, JPG, WebP, or GIF image smaller than 10 MB.");
@@ -190,7 +179,7 @@ export function useLibrary() {
     return owner.current ? drive.uploadFile(file, current.current.assetsId) : saveDemoFile(file);
   };
   const signOut = async (revoke = false) => {
-    if (locked.current) throw new Error("Please wait for the current save or sync to finish.");
+    if (jobs.current!.busy) throw new Error("Please wait for the current save or sync to finish.");
     if (revoke) await disconnect(); else clearTokens();
     const old = owner.current; epoch.current++; owner.current = null; setAccount(null); setError("");
     current.current = demoLibrary(); setLibrary(current.current);
