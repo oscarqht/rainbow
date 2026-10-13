@@ -10,18 +10,16 @@ import { enrichBookmark } from "@/lib/enrich-bookmark";
 import type { Bookmark, BookmarkData, Collection, CollectionInput, Library, Tokens } from "@/lib/types";
 const emptyLibrary = (): Library => ({ rootId: "", assetsId: "", unsortedId: "", collections: [], bookmarks: [], syncedAt: "" });
 export function useLibrary() {
-  // Rendered client-only (see rainbow-client.tsx), so localStorage is readable during the first render:
-  // the signed-in state is known immediately, without waiting for any network request.
-  const [account, setAccount] = useState<Tokens | null>(loadTokens);
-  const [library, setLibrary] = useState<Library>(() => account ? emptyLibrary() : demoLibrary());
-  const [ready, setReady] = useState(false);
+  const [account, setAccount] = useState<Tokens | null>(null);
+  const [library, setLibrary] = useState<Library>(() => demoLibrary());
+  const [ready, setReady] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [collectionIds, setCollectionIds] = useState<Record<string, string>>({});
   const [toast, setToast] = useState("");
   const [cacheWarning, setCacheWarning] = useState("");
   const current = useRef(library);
-  const owner = useRef<Tokens | null>(account);
+  const owner = useRef<Tokens | null>(null);
   const locked = useRef(false);
   const epoch = useRef(0);
   const publish = useCallback(async (next: Library, cache = true) => {
@@ -44,10 +42,24 @@ export function useLibrary() {
   useEffect(() => {
     let alive = true;
     async function initialize() {
-      // Show the cached library first; Drive is checked in the background by sync().
-      try { const cached = await getCachedLibrary(owner.current?.accountId ?? "demo"); if (alive && cached) { current.current = cached; setLibrary(cached); } }
-      catch { /* No usable cache: signed-in users see the first sync; demo users see sample data. */ }
-      if (alive) { setReady(true); await sync(); }
+      const tokens = loadTokens();
+      if (tokens) {
+        owner.current = tokens;
+        setAccount(tokens);
+      }
+      try {
+        const cached = await getCachedLibrary(tokens?.accountId ?? "demo");
+        if (alive && cached) {
+          current.current = cached;
+          setLibrary(cached);
+        }
+      } catch {
+        /* No usable cache: signed-in users see the first sync; demo users see sample data. */
+      }
+      if (alive) {
+        setReady(true);
+        if (tokens) await sync();
+      }
     }
     void initialize();
     return () => { alive = false; };

@@ -1,0 +1,7 @@
+{
+  "name": "Rainbow",
+  "description": "Your bookmarks, beautifully organized. Privately stored in your Google Drive.",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

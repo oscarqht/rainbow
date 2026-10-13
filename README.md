@@ -1,5 +1,7 @@
 # Rainbow
 
+![Rainbow](./public/poster.png)
+
 A Raindrop-style bookmark manager that stores collections, bookmarks, and files in the user's own Google Drive. Next.js handles the Google OAuth exchange so the client secret stays on the server; access and refresh tokens are kept in the browser's `localStorage`.
 
 Without Google credentials configured, Rainbow runs in demo mode, which keeps changes on the device.

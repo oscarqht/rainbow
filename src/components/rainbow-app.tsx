@@ -13,7 +13,7 @@ import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./ui/dialog";
 function RainbowMark() { return <span className="rainbow-mark" aria-hidden="true"><i /><i /><i /></span>; }
 function FolderIcon({ collection }: { collection: Collection }) { return collection.iconFileId ? <PrivateImage fileId={collection.iconFileId} className="folder-icon" /> : <Folder size={18} style={{ color: collection.color ?? "#859286" }} />; }
-export function RainbowApp() {
+export function RainbowApp({ isHydrated }: { isHydrated?: boolean } = {}) {
   const app = useLibrary();
   const { library, account, ready, busy } = app;
   const [selected, setSelected] = useState("all");
