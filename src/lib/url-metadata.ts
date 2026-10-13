@@ -21,7 +21,7 @@ export function isPublicAddress(address: string): boolean {
   return family === 4 ? !blocked.check(address, "ipv4") : family === 6 && globalV6.check(address, "ipv6") && !blocked.check(address, "ipv6");
 }
 
-export function parseMetadata(html: string): { title: string; description: string } {
+export function parseMetadata(html: string): { title: string; description: string; imageUrl?: string } {
   let inTitle = false, title = "";
   const meta: Record<string, string> = {};
   const parser = new Parser({
@@ -37,22 +37,22 @@ export function parseMetadata(html: string): { title: string; description: strin
   }, { decodeEntities: true });
   parser.end(html);
   const clean = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);
-  return { title: clean(meta["og:title"] || title || meta["twitter:title"] || "", 500), description: clean(meta["description"] || meta["og:description"] || meta["twitter:description"] || "", 5000) };
+  const imageUrl = meta["og:image:secure_url"] || meta["og:image"] || meta["twitter:image"] || meta["twitter:image:src"];
+  return { title: clean(meta["og:title"] || title || meta["twitter:title"] || "", 500), description: clean(meta["description"] || meta["og:description"] || meta["twitter:description"] || "", 5000), ...(imageUrl ? { imageUrl } : {}) };
 }
 
 // Resolve and pin a public address on every hop, including redirects, so a
 // submitted URL cannot reach private services or rebind DNS after validation.
-export async function fetchUrlMetadata(input: string): Promise<{ title: string; description: string }> {
-  const signal = AbortSignal.timeout(8000);
+async function fetchPublicResource(input: string, image: boolean, signal: AbortSignal): Promise<{ body: Buffer; type: string; url: URL }> {
   let url = new URL(input);
   for (let hop = 0; hop < 4; hop++) {
     const host = url.hostname.replace(/^\[|\]$/g, "");
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || (isIP(host) && !isPublicAddress(host))) throw new Error("Unsupported metadata URL.");
-    const result = await new Promise<{ html?: string; redirect?: string }>((resolve, reject) => {
+    if (url.href.length > 8192 || !["http:", "https:"].includes(url.protocol) || url.username || url.password || (isIP(host) && !isPublicAddress(host))) throw new Error("Unsupported metadata URL.");
+    const result = await new Promise<{ body?: Buffer; type?: string; redirect?: string }>((resolve, reject) => {
       const request = (url.protocol === "https:" ? https : http).get(url, {
         signal,
         agent: false,
-        headers: { Accept: "text/html, application/xhtml+xml", "User-Agent": "Rainbow/1.0 (bookmark metadata)" },
+        headers: { Accept: image ? "image/png, image/jpeg, image/webp, image/gif" : "text/html, application/xhtml+xml", "User-Agent": "Rainbow/1.0 (bookmark metadata)" },
         lookup(hostname, options, callback) {
           dns.lookup(hostname, { all: true }, (error, addresses) => {
             if (error) return callback(error, "", 4);
@@ -66,22 +66,37 @@ export async function fetchUrlMetadata(input: string): Promise<{ title: string; 
         if ([301, 302, 303, 307, 308].includes(response.statusCode ?? 0) && response.headers.location) {
           resolve({ redirect: response.headers.location }); response.destroy(); return;
         }
-        if (response.statusCode !== 200 || !/^(text\/html|application\/xhtml\+xml)\b/i.test(response.headers["content-type"] || "")) {
-          reject(new Error("No HTML metadata.")); response.destroy(); return;
+        const type = (response.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+        const allowed = image ? ["image/png", "image/jpeg", "image/webp", "image/gif"] : ["text/html", "application/xhtml+xml"];
+        if (response.statusCode !== 200 || !allowed.includes(type)) {
+          reject(new Error("Unsupported metadata resource.")); response.destroy(); return;
         }
         const chunks: Buffer[] = []; let size = 0;
         response.on("data", (chunk: Buffer) => {
           size += chunk.length;
-          if (size > 1_000_000) request.destroy(new Error("Metadata page is too large."));
+          if (size > (image ? 5_000_000 : 1_000_000)) request.destroy(new Error("Metadata resource is too large."));
           else chunks.push(chunk);
         });
-        response.on("end", () => resolve({ html: Buffer.concat(chunks).toString("utf8") }));
+        response.on("end", () => resolve({ body: Buffer.concat(chunks), type }));
         response.on("error", reject);
       });
       request.on("error", reject);
     });
     if (result.redirect) url = new URL(result.redirect, url);
-    else return parseMetadata(result.html!);
+    else return { body: result.body!, type: result.type!, url };
   }
   throw new Error("Too many metadata redirects.");
+}
+
+export async function fetchUrlMetadata(input: string, fetchImage = false): Promise<{ title: string; description: string; thumbnail?: { data: string; mimeType: string } }> {
+  const signal = AbortSignal.timeout(8000);
+  const page = await fetchPublicResource(input, false, signal);
+  const { imageUrl, ...metadata } = parseMetadata(page.body.toString("utf8"));
+  if (fetchImage && imageUrl) {
+    try {
+      const image = await fetchPublicResource(new URL(imageUrl, page.url).href, true, signal);
+      return { ...metadata, thumbnail: { data: image.body.toString("base64"), mimeType: image.type } };
+    } catch { /* An unavailable preview must not discard the page metadata. */ }
+  }
+  return metadata;
 }

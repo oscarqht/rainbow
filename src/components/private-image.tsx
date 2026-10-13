@@ -8,7 +8,7 @@ export function PrivateImage({ fileId, fallback, alt = "", className }: { fileId
     if (!fileId) return;
     let alive = true; let objectUrl: string | undefined;
     const load = async () => {
-      try { const blob = (fileId.startsWith("demo-image:") || fileId.startsWith("demo-file-")) ? await getDemoImage(fileId) : await readImage(fileId); if (!alive || !blob) return; objectUrl = URL.createObjectURL(blob); setImage({ id: fileId, url: objectUrl }); }
+      try { const blob = (fileId.startsWith("demo-image:") || fileId.startsWith("demo-image-") || fileId.startsWith("demo-file-")) ? await getDemoImage(fileId) : await readImage(fileId); if (!alive || !blob) return; objectUrl = URL.createObjectURL(blob); setImage({ id: fileId, url: objectUrl }); }
       catch { /* Leave a neutral placeholder if an image was removed from Drive. */ }
     };
     void load(); return () => { alive = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
