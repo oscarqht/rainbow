@@ -25,7 +25,7 @@ test("blocks private, mapped, reserved and metadata-service addresses", () => {
 });
 
 // Exercise the actual request options and DNS callback without external traffic.
-function mockPage(page: (url: URL) => { status?: number; location?: string; type?: string; html?: string }, addresses = [{ address: "93.184.216.34", family: 4 }]) {
+function mockPage(page: (url: URL) => { status?: number; location?: string; type?: string; html?: string | Buffer }, addresses = [{ address: "93.184.216.34", family: 4 }]) {
   const urls: URL[] = [];
   mock.method(dns, "lookup", (_host: string, _options: unknown, callback: (error: null, addresses: { address: string; family: number }[]) => void) => callback(null, addresses));
   mock.method(https, "get", (url: URL, options: { headers: Record<string, string>; agent: boolean; signal: AbortSignal; lookup: (host: string, options: object, callback: (error: Error | null, address: string) => void) => void }, callback: (response: Readable) => void) => {
@@ -82,5 +82,38 @@ test("endpoint returns metadata without Drive credentials and degrades to empty 
 
 test("endpoint rejects cross-origin, invalid and oversized input", async () => {
   assert.equal((await POST(request({ url: "https://example.com" }, "https://other.example"))).status, 403);
-  for (const body of [{ url: "file:///etc/passwd" }, { url: "bad" }, {}, { url: "https://example.com/" + "x".repeat(20_000) }]) assert.equal((await POST(request(body))).status, 400);
+  for (const body of [{ url: "file:///etc/passwd" }, { url: "bad" }, {}, { url: "https://example.com", fetchImage: "yes" }, { url: "https://example.com/" + "x".repeat(20_000) }]) assert.equal((await POST(request(body))).status, 400);
+});
+
+const previewHtml = '<title>Preview title</title><meta name=description content="Preview summary"><meta property="og:image" content="preview.png">';
+const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", "base64");
+
+test("extracts Open Graph and Twitter image metadata with entity decoding", () => {
+  assert.equal(parseMetadata('<meta property="og:image" content="/cover.png?a=1&amp;b=2"><meta name="twitter:image" content="/twitter.png">').imageUrl, "/cover.png?a=1&b=2");
+  assert.equal(parseMetadata('<meta name="twitter:image" content="/twitter.png">').imageUrl, "/twitter.png");
+  assert.equal(parseMetadata('<meta name="twitter:image:src" content="/legacy.png">').imageUrl, "/legacy.png");
+});
+
+test("downloads image bytes relative to the redirected page through the endpoint", async () => {
+  const urls = mockPage(url => url.pathname === "/start" ? { status: 302, location: "/article/page" } : url.pathname === "/article/page" ? { html: previewHtml } : { type: "image/png", html: png });
+  const response = await POST(request({ url: "https://example.com/start", fetchImage: true }));
+  assert.deepEqual(await response.json(), { title: "Preview title", description: "Preview summary", thumbnail: { data: png.toString("base64"), mimeType: "image/png" } });
+  assert.deepEqual(urls.map(url => url.pathname), ["/start", "/article/page", "/article/preview.png"]);
+});
+
+test("skips image downloads when the caller already has a cover", async () => {
+  const urls = mockPage(() => ({ html: previewHtml }));
+  assert.deepEqual(await fetchUrlMetadata("https://example.com/page", false), { title: "Preview title", description: "Preview summary" });
+  assert.equal(urls.length, 1);
+});
+
+test("unavailable, private, oversized or unsupported images preserve title and description", async () => {
+  for (const image of [{ status: 404 }, { type: "image/svg+xml", html: "<svg/>" }, { type: "image/png", html: Buffer.alloc(5_000_001) }, { status: 302, location: "http://127.0.0.1/secret" }]) {
+    mockPage(url => url.pathname === "/page" ? { html: previewHtml } : image);
+    assert.deepEqual(await fetchUrlMetadata("https://example.com/page", true), { title: "Preview title", description: "Preview summary" });
+    mock.restoreAll();
+  }
+  const urls = mockPage(() => ({ html: '<title>Safe title</title><meta property="og:image" content="http://169.254.169.254/secret">' }));
+  assert.deepEqual(await fetchUrlMetadata("https://example.com/page", true), { title: "Safe title", description: "" });
+  assert.equal(urls.length, 1);
 });

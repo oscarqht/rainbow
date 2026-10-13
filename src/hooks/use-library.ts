@@ -70,13 +70,22 @@ export function useLibrary() {
     return () => window.clearTimeout(timer);
   }, [toast]);
   const saveBookmark = async (input: BookmarkData, parentId: string, existing?: Bookmark): Promise<Bookmark> => {
-    if (!existing && !input.file && !input.title.trim()) {
-      let metadata: { title?: string; description?: string } = {};
+    if (!existing && !input.file && (!input.title.trim() || !input.coverFileId)) {
+      let metadata: { title?: string; description?: string; thumbnail?: { data: string; mimeType: string } } = {};
       try {
-        const response = await fetch("/api/url-metadata", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: input.url }) });
+        const response = await fetch("/api/url-metadata", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: input.url, fetchImage: !input.coverFileId }) });
         if (response.ok) metadata = await response.json();
       } catch { /* Metadata is optional; saving the URL still works. */ }
-      input = { ...input, title: metadata.title || input.url.slice(0, 500), description: input.description.trim() ? input.description : metadata.description || "" };
+      if (!input.title.trim()) input = { ...input, title: metadata.title || input.url.slice(0, 500), description: input.description.trim() ? input.description : metadata.description || "" };
+      if (!input.coverFileId && metadata.thumbnail) {
+        try {
+          const { data, mimeType } = metadata.thumbnail;
+          const image = new File([Uint8Array.from(atob(data), c => c.charCodeAt(0))], "bookmark-preview", { type: mimeType });
+          // Decode before upload so a broken image never prevents the Drive save.
+          const bitmap = await createImageBitmap(image); bitmap.close();
+          input = { ...input, coverFileId: await uploadImage(image) };
+        } catch { /* Keep saving the bookmark if the preview cannot be stored. */ }
+      }
     }
     const data = validateBookmark(input);
     if (existing || !owner.current) return mutate(async () => {
