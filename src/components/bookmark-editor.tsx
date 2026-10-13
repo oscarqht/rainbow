@@ -7,8 +7,8 @@ import { BookmarkLink } from "./bookmark-link";
 import { PrivateImage } from "./private-image";
 import { validateFile } from "@/lib/library";
 import type { Bookmark, BookmarkData, Collection } from "@/lib/types";
-type Props = { bookmark?: Bookmark; collections: Collection[]; parentId: string; onClose: () => void; onSave: (data: BookmarkData, parentId: string, existing?: Bookmark) => Promise<Bookmark>; onDelete: (bookmark: Bookmark) => Promise<void>; uploadImage: (file: File) => Promise<string>; uploadFile: (file: File) => Promise<string>; busy: boolean };
-export function BookmarkEditor({ bookmark, collections, parentId, onClose, onSave, onDelete, uploadImage, uploadFile, busy }: Props) {
+type Props = { bookmark?: Bookmark; collections: Collection[]; parentId: string; onClose: () => void; onSave: (data: BookmarkData, parentId: string, existing?: Bookmark) => Promise<Bookmark>; onDelete: (bookmark: Bookmark) => Promise<void>; uploadImage: (file: File) => Promise<string>; uploadFile: (file: File) => Promise<string> };
+export function BookmarkEditor({ bookmark, collections, parentId, onClose, onSave, onDelete, uploadImage, uploadFile }: Props) {
   const [kind, setKind] = useState(bookmark?.file ? "file" : "link");
   const [file, setFile] = useState<File>();
   const [attachment, setAttachment] = useState(bookmark?.file);
@@ -68,8 +68,8 @@ export function BookmarkEditor({ bookmark, collections, parentId, onClose, onSav
       </div>
       </fieldset>
       {error && <p className="form-error" role="alert">{error} Your draft is still here. Refresh the library and reopen this bookmark to review the latest version; copy your draft first.</p>}
-      <div className="dialog-footer">{bookmark && <><Button type="button" variant="ghost" size="icon" aria-label="Delete bookmark" disabled={saving || busy} onClick={() => void remove()}><Trash2 size={18} /></Button><BookmarkLink bookmark={bookmark} className="open-link">{bookmark.file ? "Open file" : "Open link"} <ExternalLink size={13} /></BookmarkLink></>}
-        <div className="footer-actions"><Button type="button" variant="secondary" disabled={saving} onClick={onClose}>Cancel</Button><Button disabled={saving || busy || !collection}>{saving && <Loader2 size={16} className="spin" />} {saving ? "Saving…" : "Save bookmark"}</Button></div>
+      <div className="dialog-footer">{bookmark && <><Button type="button" variant="ghost" size="icon" aria-label="Delete bookmark" disabled={saving} onClick={() => void remove()}><Trash2 size={18} /></Button><BookmarkLink bookmark={bookmark} className="open-link">{bookmark.file ? "Open file" : "Open link"} <ExternalLink size={13} /></BookmarkLink></>}
+        <div className="footer-actions"><Button type="button" variant="secondary" disabled={saving} onClick={onClose}>Cancel</Button><Button disabled={saving || !collection}>{saving && <Loader2 size={16} className="spin" />} {saving ? "Saving…" : "Save bookmark"}</Button></div>
       </div>
     </form>
   </DialogContent></Dialog>;
