@@ -1,5 +1,5 @@
 import { getAccessToken } from "./auth-client";
-import { validateBookmark, validateCollection, validateId } from "./library";
+import { validateBookmark, validateCollection, validateId, validateFile } from "./library";
 import type { Bookmark, BookmarkData, Collection, CollectionInput, Library } from "./types";
 
 const API = "https://www.googleapis.com/drive/v3";
@@ -193,7 +193,14 @@ async function writeJson(name: string, data: unknown, kind: string, parentId: st
 }
 export async function saveBookmark(input: BookmarkData, parentId: string, existing?: Bookmark): Promise<Bookmark> {
   const data = validateBookmark(input), library = await parentRoot(parentId);
-  const hints = data.coverFileId ? { thumbnail: await thumbnail(data.coverFileId) } : undefined;
+  let hints: Hints | undefined;
+  if (data.coverFileId) {
+    try { hints = { thumbnail: await thumbnail(data.coverFileId) }; }
+    catch (error) {
+      // Some uploaded image formats cannot be decoded by canvas; keep the original as the cover.
+      if (data.coverFileId !== data.file?.id) throw error;
+    }
+  }
   const latest = existing ? await assertUnchanged(existing.id, existing.modifiedTime) : undefined;
   if (latest && (latest.appProperties?.library !== library || latest.appProperties?.kind !== "bookmark")) throw new Error("Invalid bookmark reference.");
   const file = await writeJson(`${data.title}.json`, data, "bookmark", parentId, library, latest, hints);
@@ -233,14 +240,19 @@ export async function trashCollection(collection: Collection): Promise<void> {
 }
 export async function uploadImage(file: File, assetsId: string): Promise<string> {
   if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type) || file.size > 10 * 1024 * 1024 || file.size === 0) throw new Error("Choose a PNG, JPG, GIF, or WebP image under 10 MB.");
+  return uploadFile(file, assetsId);
+}
+export async function uploadFile(file: File, assetsId: string): Promise<string> {
+  validateFile(file);
+  const mimeType = file.type || "application/octet-stream";
   const assets = await metadata(assetsId);
   if (assets.appProperties?.kind !== "assets" || assets.appProperties.app !== "rainbow" || assets.trashed) throw new Error("Invalid assets folder.");
   const boundary = `rainbow_${crypto.randomUUID()}`;
-  const body = new Blob([`--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify({ name: `${crypto.randomUUID()}-${file.name.slice(0, 100)}`, parents: [assetsId], mimeType: file.type, appProperties: properties("asset", assets.appProperties.library) })}\r\n--${boundary}\r\nContent-Type: ${file.type}\r\n\r\n`, file, `\r\n--${boundary}--`]);
+  const body = new Blob([`--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify({ name: `${crypto.randomUUID()}-${file.name.slice(0, 100)}`, parents: [assetsId], mimeType, appProperties: properties("asset", assets.appProperties.library) })}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`, file, `\r\n--${boundary}--`]);
   return (await (await driveRequest("files?uploadType=multipart&fields=id", { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body }, true)).json()).id;
 }
 export async function readImage(fileId: string): Promise<Blob> {
   const blob = await (await driveRequest(`files/${validateId(fileId)}?alt=media`)).blob();
-  if (!blob.type.startsWith("image/") || blob.size > 10 * 1024 * 1024) throw new Error("This cover is not a supported image under 10 MB.");
+  if (!blob.type.startsWith("image/") || blob.size > 50 * 1024 * 1024) throw new Error("This cover is not a supported image up to 50 MB.");
   return blob;
 }

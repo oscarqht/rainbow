@@ -31,3 +31,5 @@ export const cacheLibrary = (account: string, library: Library) => operation(`li
 export async function clearAccountCache(account: string) { await operation(`library:${account}`, undefined, true); }
 export async function saveDemoImage(file: File): Promise<string> { const id = `demo-image:${crypto.randomUUID()}`; await operation(id, file); return id; }
 export async function getDemoImage(id: string): Promise<Blob | undefined> { return operation<Blob>(id); }
+
+export async function saveDemoFile(file: File): Promise<string> { const id = `demo-file-${crypto.randomUUID()}`; await operation(id, file); return id; }

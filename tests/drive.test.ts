@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
-import { ConflictError, driveRequest, loadLibrary, saveBookmark, saveCollection, uploadImage, readImage, trashBookmark, trashCollection } from "../src/lib/drive";
-import { validateBookmark } from "../src/lib/library";
+import { ConflictError, driveRequest, loadLibrary, saveBookmark, saveCollection, uploadImage, uploadFile, readImage, trashBookmark, trashCollection } from "../src/lib/drive";
+import { validateBookmark, validateFile } from "../src/lib/library";
 import type { Bookmark, Library } from "../src/lib/types";
 
 const originalFetch = globalThis.fetch;
@@ -129,4 +129,37 @@ test("root discovery failures never create a duplicate root", async () => {
 test("403 errors surface Google's reason, with setup guidance when the Drive API is disabled", async () => {
   responses([Response.json({ error: { code: 403, errors: [{ reason: "accessNotConfigured" }] } }, { status: 403 })]);
   await assert.rejects(driveRequest("files"), /Drive API is not enabled/);
+});
+
+test("file bookmarks retain attachment metadata through save and reload", async () => {
+  const data = { ...book, url: "", file: { id: "asset", name: "notes.pdf", mimeType: "application/pdf" } };
+  responses([f("collection", "collection"), f("bookmark", "bookmark", "collection")]);
+  const saved = await saveBookmark(data, "collection");
+  assert.equal(saved.url, "https://drive.google.com/file/d/asset/view");
+  assert.deepEqual(saved.file, data.file);
+  assert.match(String(calls[1].init?.body), /notes.pdf/);
+  responses([{ startPageToken: "start" }, { files: [f("root", "root")] }, { files: [f("assets", "assets"), f("unsorted", "collection"), f("bookmark", "bookmark", "unsorted")] }, saved]);
+  assert.deepEqual((await loadLibrary()).bookmarks[0].file, data.file);
+});
+test("arbitrary files upload as private assets with a binary MIME fallback", async () => {
+  responses([f("assets", "assets"), { id: "asset" }]);
+  assert.equal(await uploadFile(new File(["binary content"], "notes.bin"), "assets"), "asset");
+  const body = await (calls[1].init?.body as Blob).text();
+  assert.match(body, /application\/octet-stream/);
+  assert.match(body, /"parents":\["assets"\]/);
+  assert.match(body, /binary content/);
+  assert.match(body, /"kind":"asset"/);
+});
+test("file validation rejects empty, oversized, and invalid references", () => {
+  assert.throws(() => validateFile(new File([], "empty.txt")), /nonempty/);
+  assert.throws(() => validateFile({ size: 50 * 1024 * 1024 + 1, name: "large", type: "" } as File), /50 MB/);
+  assert.throws(() => validateBookmark({ ...book, file: { id: "../file", name: "file", mimeType: "text/plain" } }), /reference/);
+  assert.throws(() => validateBookmark({ ...book, file: { id: "file", name: "", mimeType: "text/plain" } }), /File name/);
+});
+test("an image file can use its own asset as the cover even without canvas decoding", async () => {
+  const data = { ...book, file: { id: "image", name: "drawing.svg", mimeType: "image/svg+xml" }, coverFileId: "image" };
+  responses([f("collection", "collection"), new Response(new Blob(["<svg/>"], { type: "image/svg+xml" })), f("bookmark", "bookmark", "collection")]);
+  const saved = await saveBookmark(data, "collection");
+  assert.equal(saved.coverFileId, saved.file?.id);
+  assert.match(String(calls[2].init?.body), /"coverFileId":"image"/);
 });
