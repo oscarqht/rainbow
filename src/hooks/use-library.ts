@@ -196,5 +196,9 @@ export function useLibrary() {
     current.current = demoLibrary(); setLibrary(current.current);
     if (old) await clearAccountCache(old.accountId).catch(() => undefined);
   };
-  return { library, account, ready, busy, error, toast, resolveCollectionId: (id: string) => collectionIds[id] ?? id, dismissToast: () => setToast(""), cacheWarning, sync, saveBookmark, saveCollection, trashBookmark, trashCollection, uploadImage, uploadFile, signOut };
+  const runMigration = async (fn: () => Promise<void>) => {
+    if (!owner.current || !current.current.rootId || current.current.rootId.startsWith("demo")) throw new Error("Connect and sync Google Drive before migrating.");
+    try { await mutate(fn, false); } finally { await sync(); }
+  };
+  return { library, account, ready, busy, error, toast, resolveCollectionId: (id: string) => collectionIds[id] ?? id, dismissToast: () => setToast(""), cacheWarning, sync, runMigration, saveBookmark, saveCollection, trashBookmark, trashCollection, uploadImage, uploadFile, signOut };
 }

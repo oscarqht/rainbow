@@ -42,7 +42,7 @@ export function BookmarkEditor({ bookmark, collections, parentId, onClose, onSav
       }
       if (cover) { imageId = await uploadImage(cover); setCoverId(imageId); setCover(undefined); }
       const parsed = new URL(kind === "file" ? `https://drive.google.com/file/d/${uploaded!.id}/view` : url.trim()); if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("Use an http:// or https:// link.");
-      await onSave({ schemaVersion: 1, ...(kind === "file" ? { file: uploaded } : {}), url: parsed.href, title: title.trim(), description: description.trim(), note, tags: [...new Set(tags.split(",").map(t => t.trim()).filter(Boolean))], ...(useCover && imageId ? { coverFileId: imageId } : {}) }, collection, bookmark);
+      await onSave({ schemaVersion: 1, ...(bookmark?.raindrop ? { raindrop: bookmark.raindrop } : {}), ...(kind === "file" ? { file: uploaded } : {}), url: parsed.href, title: title.trim(), description: description.trim(), note, tags: [...new Set(tags.split(",").map(t => t.trim()).filter(Boolean))], ...(useCover && imageId ? { coverFileId: imageId } : {}) }, collection, bookmark);
       onClose();
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to save this bookmark."); }
     finally { setSaving(false); }

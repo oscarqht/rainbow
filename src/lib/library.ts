@@ -20,7 +20,13 @@ export function validateBookmark(value: unknown): BookmarkData {
   if (!["https:", "http:"].includes(parsed.protocol)) throw new Error("Only HTTP and HTTPS bookmarks are supported.");
   if (!Array.isArray(b.tags) || b.tags.length > 50) throw new Error("Use at most 50 tags.");
   const tags = [...new Set(b.tags.map(t => text(t, "Tag", 100, true).trim()))];
-  return { schemaVersion: 1, ...(file ? { file } : {}), url: parsed.href, title: text(b.title, "Title", 500, true), description: text(b.description, "Description", 5000), note: text(b.note, "Note", 100000), tags, ...(b.coverFileId ? { coverFileId: validateId(b.coverFileId) } : {}) };
+  let raindrop: BookmarkData["raindrop"];
+  if (b.raindrop !== undefined) {
+    const r = b.raindrop as BookmarkData["raindrop"];
+    if (!r || typeof r.accountId !== "string" || !/^\d+$/.test(r.accountId) || !r.item || typeof r.item !== "object" || Array.isArray(r.item) || !Array.isArray(r.assets) || JSON.stringify(r).length > 1_000_000) throw new Error("Invalid Raindrop metadata.");
+    raindrop = { accountId: r.accountId, item: r.item, assets: r.assets.map(a => ({ url: text(a.url, "Source asset URL", 8192, true), id: validateId(a.id) })) };
+  }
+  return { schemaVersion: 1, ...(file ? { file } : {}), url: parsed.href, title: text(b.title, "Title", 500, true), description: text(b.description, "Description", 5000), note: text(b.note, "Note", 100000), tags, ...(b.coverFileId ? { coverFileId: validateId(b.coverFileId) } : {}), ...(raindrop ? { raindrop } : {}) };
 }
 export function validateId(value: unknown): string {
   if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{1,200}$/.test(value)) throw new Error("Invalid Drive file reference.");
