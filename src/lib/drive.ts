@@ -229,11 +229,23 @@ export async function saveCollection(input: CollectionInput, existing?: Collecti
   const written = await writeJson("_collection.json", data, "config", folder.id, library, config);
   return { ...data, id: folder.id, version: folder.version, modifiedTime: folder.modifiedTime, configId: written.id, configVersion: written.version, configModifiedTime: written.modifiedTime, system: existing?.system };
 }
-async function trash(item: { id: string; modifiedTime?: string }): Promise<void> {
-  const latest = await assertUnchanged(item.id, item.modifiedTime);
+async function trash(item: { id: string; modifiedTime?: string }, allowTrashed = false): Promise<void> {
+  const latest = await metadata(item.id);
+  if (latest.trashed && allowTrashed) return;
+  if (latest.trashed || (item.modifiedTime && latest.modifiedTime !== item.modifiedTime)) throw new ConflictError();
   await driveRequest(`files/${validateId(item.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json", ...(latest.etag ? { "If-Match": latest.etag } : {}) }, body: JSON.stringify({ trashed: true }) });
 }
-export async function trashBookmark(bookmark: Bookmark): Promise<void> { await trash(bookmark); }
+export async function trashBookmark(bookmark: Bookmark): Promise<void> {
+  // Allow retrying cover cleanup after the bookmark has already reached Trash.
+  await trash(bookmark, !!bookmark.coverFileId);
+  if (bookmark.coverFileId) {
+    try { await trash({ id: bookmark.coverFileId }, true); }
+    catch (error) {
+      if (error instanceof DriveError && error.status === 404) return;
+      throw new Error(`The bookmark is in Trash, but its cover could not be moved to Trash. Retry deleting this bookmark to finish cleanup. ${(error as Error).message}`);
+    }
+  }
+}
 export async function trashCollection(collection: Collection): Promise<void> {
   if (collection.system) throw new Error("Unsorted cannot be deleted.");
   await trash(collection);

@@ -87,6 +87,42 @@ test("trash uses conditional update; Unsorted cannot be deleted", async () => {
   assert.equal(calls[1].init?.body, JSON.stringify({ trashed: true }));
   await assert.rejects(trashCollection({ id: "unsorted", name: "Unsorted", parentId: "root", order: 0, view: "grid", system: "unsorted" }), /cannot be deleted/);
 });
+test("deleting a bookmark also trashes its cover with a conditional update", async () => {
+  responses([f("bookmark", "bookmark", "collection"), {}, Response.json(f("image", "asset", "assets"), { headers: { ETag: '"cover"' } }), {}]);
+  await trashBookmark({ ...bookmark, coverFileId: "image" });
+  assert.deepEqual(calls.filter(c => c.init?.method === "PATCH").map(c => [c.url, c.init?.body]), [
+    ["https://www.googleapis.com/drive/v3/files/bookmark", JSON.stringify({ trashed: true })],
+    ["https://www.googleapis.com/drive/v3/files/image", JSON.stringify({ trashed: true })],
+  ]);
+  assert.equal(new Headers(calls[3].init?.headers).get("If-Match"), '"cover"');
+});
+test("a stale bookmark or failed delete never trashes its cover", async () => {
+  for (const items of [
+    [f("bookmark", "bookmark", "collection", { modifiedTime: "later" })],
+    [f("bookmark", "bookmark", "collection"), new Response("", { status: 412 })],
+  ]) {
+    calls = [];
+    responses(items);
+    await assert.rejects(trashBookmark({ ...bookmark, coverFileId: "image" }), ConflictError);
+    assert.equal(calls.some(c => c.url.includes("files/image")), false);
+  }
+});
+test("failed cover cleanup can be retried after the bookmark was trashed", async () => {
+  responses([f("bookmark", "bookmark", "collection"), {}, f("image", "asset", "assets"), new Response("", { status: 403 })]);
+  await assert.rejects(trashBookmark({ ...bookmark, coverFileId: "image" }), /bookmark is in Trash.*Retry deleting/);
+  calls = [];
+  responses([f("bookmark", "bookmark", "collection", { trashed: true, modifiedTime: "later" }), f("image", "asset", "assets"), {}]);
+  await trashBookmark({ ...bookmark, coverFileId: "image" });
+  assert.deepEqual(calls.filter(c => c.init?.method === "PATCH").map(c => c.url), ["https://www.googleapis.com/drive/v3/files/image"]);
+});
+test("already trashed or missing covers do not prevent bookmark deletion", async () => {
+  for (const cover of [f("image", "asset", "assets", { trashed: true }), new Response("", { status: 404 })]) {
+    calls = [];
+    responses([f("bookmark", "bookmark", "collection"), {}, cover]);
+    await trashBookmark({ ...bookmark, coverFileId: "image", file: { id: "image", name: "image.png", mimeType: "image/png" } });
+    assert.equal(calls.length, 3);
+  }
+});
 test("collection creation writes real folder and companion config", async () => {
   responses([f("root", "root"), f("collection", "collection"), f("config", "config", "collection")]);
   const saved = await saveCollection({ name: "Design", parentId: "root", order: 1, view: "grid" });
