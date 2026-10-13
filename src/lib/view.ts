@@ -1,7 +1,7 @@
 import type { Bookmark, Collection } from "./types";
 export function filterBookmarks(bookmarks: Bookmark[], collection: string, tag: string | null, query: string) {
   const terms = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
-  return bookmarks.filter(b => (collection === "all" || b.parentId === collection) && (!tag || b.tags.includes(tag)) && terms.every(term => [b.title, b.url, b.description, b.note, ...b.tags].join(" ").toLocaleLowerCase().includes(term)));
+  return bookmarks.filter(b => (collection === "all" || b.parentId === collection) && (!tag || b.tags.includes(tag)) && terms.every(term => [b.title, b.url, b.file?.name ?? "", b.description, b.note, ...b.tags].join(" ").toLocaleLowerCase().includes(term)));
 }
 export function descendantIds(collections: Collection[], id: string): Set<string> {
   const result = new Set([id]);

@@ -246,3 +246,6 @@ small { color: var(--muted); }
 }
 
 .app-boot { min-height: 100vh; background: var(--bg); }
+
+.bookmark-kind { display: flex; gap: 8px; }
+.bookmark-fields { display: flex; flex-direction: column; gap: 14px; border: 0; padding: 0; margin: 0; min-width: 0; }

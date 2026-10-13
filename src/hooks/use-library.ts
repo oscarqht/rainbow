@@ -2,8 +2,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as drive from "@/lib/drive";
 import { loadTokens, clearTokens, disconnect, AuthError } from "@/lib/auth-client";
-import { cacheLibrary, getCachedLibrary, clearAccountCache, saveDemoImage } from "@/lib/cache";
+import { cacheLibrary, getCachedLibrary, clearAccountCache, saveDemoImage, saveDemoFile } from "@/lib/cache";
 import { demoLibrary } from "@/lib/demo";
+import { validateFile } from "@/lib/library";
 import { descendantIds } from "@/lib/view";
 import type { Bookmark, BookmarkData, Collection, CollectionInput, Library, Tokens } from "@/lib/types";
 const emptyLibrary = (): Library => ({ rootId: "", assetsId: "", unsortedId: "", collections: [], bookmarks: [], syncedAt: "" });
@@ -82,6 +83,10 @@ export function useLibrary() {
     if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type) || file.size > 10 * 1024 * 1024) throw new Error("Choose a PNG, JPG, WebP, or GIF image smaller than 10 MB.");
     return owner.current ? drive.uploadImage(file, current.current.assetsId) : saveDemoImage(file);
   };
+  const uploadFile = async (file: File) => {
+    validateFile(file);
+    return owner.current ? drive.uploadFile(file, current.current.assetsId) : saveDemoFile(file);
+  };
   const signOut = async (revoke = false) => {
     if (locked.current) throw new Error("Please wait for the current save or sync to finish.");
     if (revoke) await disconnect(); else clearTokens();
@@ -89,5 +94,5 @@ export function useLibrary() {
     current.current = demoLibrary(); setLibrary(current.current);
     if (old) await clearAccountCache(old.accountId).catch(() => undefined);
   };
-  return { library, account, ready, busy, error, cacheWarning, sync, saveBookmark, saveCollection, trashBookmark, trashCollection, uploadImage, signOut };
+  return { library, account, ready, busy, error, cacheWarning, sync, saveBookmark, saveCollection, trashBookmark, trashCollection, uploadImage, uploadFile, signOut };
 }
