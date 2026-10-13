@@ -70,6 +70,14 @@ export function useLibrary() {
     return () => window.clearTimeout(timer);
   }, [toast]);
   const saveBookmark = async (input: BookmarkData, parentId: string, existing?: Bookmark): Promise<Bookmark> => {
+    if (!existing && !input.file && !input.title.trim()) {
+      let metadata: { title?: string; description?: string } = {};
+      try {
+        const response = await fetch("/api/url-metadata", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: input.url }) });
+        if (response.ok) metadata = await response.json();
+      } catch { /* Metadata is optional; saving the URL still works. */ }
+      input = { ...input, title: metadata.title || input.url.slice(0, 500), description: input.description.trim() ? input.description : metadata.description || "" };
+    }
     const data = validateBookmark(input);
     if (existing || !owner.current) return mutate(async () => {
       const result = owner.current ? await drive.saveBookmark(data, parentId, existing) : { ...data, id: existing?.id ?? crypto.randomUUID(), parentId, version: String(Number(existing?.version ?? 0) + 1), modifiedTime: new Date().toISOString(), demoCover: existing?.demoCover };
